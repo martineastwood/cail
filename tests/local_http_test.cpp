@@ -180,8 +180,9 @@ int main(int argc, char** argv)
     gemini_tool_request.tools = {cail::make_tool<Answer>("search", "Search")};
     const auto gemini_call = gemini.generate(gemini_tool_request);
     check(gemini_call && gemini_call->tool_calls.size() == 1 &&
-              gemini_call->tool_calls.front().id.find("signature") != std::string::npos &&
-              gemini_call->tool_calls.front().id.find("call_1") != std::string::npos &&
+              gemini_call->tool_calls.front().id == "call_1" &&
+              gemini_call->tool_calls.front().provider_options &&
+              gemini_call->tool_calls.front().provider_options->find("signature") != std::string::npos &&
               gemini_call->tool_calls.front().name == "search",
           "Gemini function call and thought signature");
     cail::detail::gemini::Client validating_gemini({
@@ -193,11 +194,14 @@ int main(int argc, char** argv)
             cail::Message{.role = cail::MessageRole::user,
                           .content = {cail::ImagePart{.bytes = std::string{"A\0B", 3}, .mime_type = "image/png"}}},
             cail::Message{.role = cail::MessageRole::assistant,
-                          .tool_calls = {cail::ToolCall{.id = R"({"id":"call_1","signature":"signature"})", .name = "search",
-                                                        .arguments = R"({"q":"x"})"}}},
+                          .tool_calls = {cail::ToolCall{
+                              .id = "call_1",
+                              .name = "search",
+                              .arguments = R"({"q":"x"})",
+                              .provider_options = R"({"thought_signature":"signature"})"}}},
             cail::Message{.role = cail::MessageRole::tool,
                           .content = {cail::TextPart{.text = R"({"answer":"yes"})"}},
-                          .tool_call_id = R"({"id":"call_1","signature":"signature"})"},
+                          .tool_call_id = "call_1"},
         },
     };
     const auto gemini_mapped = validating_gemini.generate(gemini_history);
@@ -215,16 +219,16 @@ int main(int argc, char** argv)
               std::chrono::steady_clock::now() - anthropic_began < std::chrono::seconds(2),
           "Anthropic cancels the live HTTP stream");
 
-    const auto openai_caps = cail::openai("test-model").capabilities();
-    const auto chat_caps = cail::openrouter("test-model").capabilities();
-    const auto anthropic_caps = cail::anthropic("test-model").capabilities();
-    const auto gemini_caps = cail::gemini("test-model").capabilities();
+    const auto openai_caps = cail::openai("test-model").adapter_capabilities();
+    const auto chat_caps = cail::openrouter("test-model").adapter_capabilities();
+    const auto anthropic_caps = cail::anthropic("test-model").adapter_capabilities();
+    const auto gemini_caps = cail::gemini("test-model").adapter_capabilities();
     check(openai_caps.streaming && openai_caps.image_input && openai_caps.structured_output &&
               openai_caps.continuation && chat_caps.streaming && chat_caps.structured_output &&
               !chat_caps.continuation && anthropic_caps.streaming && anthropic_caps.tools &&
               anthropic_caps.structured_output && gemini_caps.streaming && gemini_caps.tools &&
               gemini_caps.structured_output && !gemini_caps.continuation,
-          "Provider capabilities reflect adapter support");
+          "Adapter capabilities reflect what each integration can encode and parse");
 
     cail::detail::chat_completions::Client held_chat(base + "/chat/hold", "test-model", "test-key", {});
     std::stop_source stop;

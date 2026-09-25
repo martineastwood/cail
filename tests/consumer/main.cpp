@@ -23,7 +23,7 @@ int main()
     const auto hyper = cail::hyper("deepseek-v4-flash");
     const auto ollama_cloud = cail::ollama_cloud("gemma4:31b");
     return decoded && decoded->confidence.value == 0.8 && decoded->explanation == "clear" &&
-                   model.capabilities().structured_output && anthropic.capabilities().tools &&
-                   gemini.capabilities().streaming && mistral.capabilities().tools &&
-                   hyper.capabilities().streaming && ollama_cloud.capabilities().tools ? 0 : 1;
+                   model.adapter_capabilities().structured_output && anthropic.adapter_capabilities().tools &&
+                   gemini.adapter_capabilities().streaming && mistral.adapter_capabilities().tools &&
+                   hyper.adapter_capabilities().streaming && ollama_cloud.adapter_capabilities().tools ? 0 : 1;
 }

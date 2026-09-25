@@ -32,7 +32,7 @@ struct TextPart { std::string text; };
 struct InlineData { std::string mimeType; std::string data; };
 struct ImagePart { InlineData inlineData; };
 struct FunctionCall { std::string name; glz::raw_json args; std::optional<std::string> id; };
-struct CallState { std::optional<std::string> id; std::optional<std::string> signature; };
+struct ToolOptions { std::optional<std::string> thought_signature; };
 struct CallPart { FunctionCall functionCall; std::optional<std::string> thoughtSignature; };
 struct FunctionResponse { std::string name; glz::raw_json response; std::optional<std::string> id; };
 struct ResultPart { FunctionResponse functionResponse; };
@@ -70,6 +70,43 @@ struct ResponseBody {
 struct ProviderError { std::string message; std::optional<std::string> status; };
 struct ErrorBody { std::optional<ProviderError> error; };
 
+[[nodiscard]] inline const cail::ToolCall* find_tool_call(const GenerationRequest& request, std::string_view id)
+{
+    for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it) {
+        for (const auto& call : it->tool_calls) {
+            if (call.id == id) {
+                return &call;
+            }
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] inline Result<std::optional<std::string>> thought_signature(const cail::ToolCall& call)
+{
+    if (!call.provider_options) {
+        return std::optional<std::string>{};
+    }
+    auto options = from_json<ToolOptions>(*call.provider_options);
+    if (!options) {
+        return std::unexpected(options.error());
+    }
+    return options->thought_signature;
+}
+
+[[nodiscard]] inline Result<std::optional<std::string>> encode_tool_options(
+    const std::optional<std::string>& thought_signature)
+{
+    if (!thought_signature) {
+        return std::optional<std::string>{};
+    }
+    auto encoded = to_json(ToolOptions{.thought_signature = thought_signature});
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    return std::optional<std::string>{std::move(*encoded)};
+}
+
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request)
 {
     if (request.messages.empty() || request.continuation_token)
@@ -100,21 +137,14 @@ struct ErrorBody { std::optional<ProviderError> error; };
                 message.content.size() != 1 || !std::holds_alternative<cail::TextPart>(message.content.front()))
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                     .message = "Gemini tool results require a preceding model call and one JSON text part."});
-            const auto& calls = request.messages;
-            std::string name;
-            for (auto it = calls.rbegin(); it != calls.rend(); ++it) {
-                for (const auto& call : it->tool_calls) if (call.id == message.tool_call_id) name = call.name;
-                if (!name.empty()) break;
-            }
+            const auto* matched = find_tool_call(request, message.tool_call_id);
             const auto& output = std::get<cail::TextPart>(message.content.front()).text;
-            if (name.empty() || glz::validate_json(output))
+            if (!matched || matched->id.empty() || glz::validate_json(output))
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                     .message = "Gemini tool result requires a known call ID and JSON output."});
-            auto state = from_json<CallState>(message.tool_call_id);
-            if (!state) return std::unexpected(state.error());
             auto added = append_json(body.contents.emplace_back(Content{.role = "user"}).parts,
                 ResultPart{.functionResponse = FunctionResponse{
-                    .name = name, .response = glz::raw_json{output}, .id = state->id}});
+                    .name = matched->name, .response = glz::raw_json{output}, .id = matched->id}});
             if (!added) return std::unexpected(added.error());
             continue;
         }
@@ -134,15 +164,15 @@ struct ErrorBody { std::optional<ProviderError> error; };
             return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                 .message = "Only Gemini model messages can contain function calls."});
         for (const auto& call : message.tool_calls) {
-            if (call.name.empty() || glz::validate_json(call.arguments))
+            if (call.id.empty() || call.name.empty() || glz::validate_json(call.arguments))
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
-                    .message = "Gemini function calls require a name and JSON arguments."});
-            auto state = from_json<CallState>(call.id);
-            if (!state) return std::unexpected(state.error());
+                    .message = "Gemini function calls require an ID, name, and JSON arguments."});
+            auto signature = thought_signature(call);
+            if (!signature) return std::unexpected(signature.error());
             auto added = append_json(content.parts, CallPart{
                 .functionCall = FunctionCall{
-                    .name = call.name, .args = glz::raw_json{call.arguments}, .id = state->id},
-                .thoughtSignature = state->signature});
+                    .name = call.name, .args = glz::raw_json{call.arguments}, .id = call.id},
+                .thoughtSignature = *signature});
             if (!added) return std::unexpected(added.error());
         }
         if (content.parts.empty()) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -210,10 +240,18 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage)
             if (call.name.empty() || call.args.str.empty())
                 return std::unexpected(Error{.code = ErrorCode::provider_response,
                     .message = "Gemini returned an incomplete function call."});
-            auto state = to_json(CallState{.id = call.id, .signature = part.thoughtSignature});
-            if (!state) return std::unexpected(state.error());
-            cail::ToolCall mapped{.id = std::move(*state),
-                .name = call.name, .arguments = call.args.str};
+            if (!call.id || call.id->empty()) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = "Gemini returned a function call without an ID."});
+            }
+            auto options = encode_tool_options(part.thoughtSignature);
+            if (!options) return std::unexpected(options.error());
+            cail::ToolCall mapped{
+                .id = *call.id,
+                .name = call.name,
+                .arguments = call.args.str,
+                .provider_options = std::move(*options),
+            };
             if (on_event) on_event(StreamEvent{ToolCallReady{
                 .output_index = result.tool_calls.size(), .call = mapped}});
             result.tool_calls.push_back(std::move(mapped));
@@ -329,7 +367,7 @@ public:
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {
                 return client->stream(request, handler, stop);
-            }, LanguageModelCapabilities{.image_input = true, .tools = true,
+            }, AdapterCapabilities{.image_input = true, .tools = true,
                 .structured_output = true, .reasoning = true}};
     }
 private:

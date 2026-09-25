@@ -1,36 +1,16 @@
 #pragma once
 
-#include <cail/chat_completions.hpp>
-#include <cail/detail/env.hpp>
-
-#include <string>
-#include <utility>
-#include <vector>
+#include <cail/detail/chat_completions_preset.hpp>
 
 namespace cail {
 
-struct MistralSettings {
-    std::string api_key;
-    std::vector<HttpHeader> headers;
+struct MistralTag {
+    static constexpr const char* endpoint = "https://api.mistral.ai/v1/chat/completions";
+    static constexpr const char* env_var = "MISTRAL_API_KEY";
 };
 
-class MistralProvider {
-    public:
-    explicit MistralProvider(MistralSettings settings = {}) : settings_(std::move(settings)) {}
-
-    [[nodiscard]] LanguageModel operator()(std::string model_id) const
-    {
-        auto key = detail::env_or(settings_.api_key, "MISTRAL_API_KEY");
-        return create_chat_completions({
-            .endpoint = "https://api.mistral.ai/v1/chat/completions",
-            .api_key = std::move(key),
-            .headers = settings_.headers,
-        })(std::move(model_id));
-    }
-
-    private:
-    MistralSettings settings_;
-};
+using MistralSettings = ChatCompletionsPresetSettings<MistralTag>;
+using MistralProvider = detail::ChatCompletionsPresetProvider<MistralTag>;
 
 [[nodiscard]] inline MistralProvider create_mistral(MistralSettings settings = {})
 {

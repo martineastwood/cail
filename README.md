@@ -30,7 +30,7 @@ Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
 
 ## Current implementation
 
-The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Anthropic, Gemini, Mistral, Charm Hyper, and Ollama Cloud providers. It targets C++23.
+The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Azure Foundry, Anthropic, Gemini, Mistral, Charm Hyper, and Ollama Cloud providers. It targets C++23.
 
 `magic_enum` supplies enum names because Glaze's C++23 mode serializes enums as integers by default. Glaze remains the backend for struct reflection and JSON conversion.
 
@@ -237,17 +237,45 @@ cmake --build build --target cail_gemini_prompt cail_gemini_stream cail_gemini_o
 ./build/cail_gemini_tool_call
 ```
 
-Use `model.capabilities()` to check which features the CAIL adapter can send or receive:
+Use `model.adapter_capabilities()` to check what the CAIL integration for that API can encode, decode, and stream:
 
 ```cpp
-if (model.capabilities().tools) {
-    // You can pass tool definitions in a GenerationRequest.
+if (model.adapter_capabilities().tools) {
+    // This adapter can attach tool definitions to the request.
 }
 ```
 
-The flags describe adapter support. A selected model or endpoint may support fewer features and can still reject a request. Check the provider's model documentation for model-specific availability.
+These flags describe adapter support, not model support. For example, `mistral.adapter_capabilities().image_input == true` means CAIL can pass image parts through the Mistral Chat Completions integration. It does not mean every Mistral model accepts images.
+
+If you send a feature the adapter supports but the selected model does not, the provider can still reject the request. Check the provider's model documentation for model-specific availability.
 
 The optional `system` prompt is sent as the first system message and works with both `prompt` and `messages`.
+
+## Use Azure Foundry
+
+Azure Foundry serves each model through its OpenAI Responses-compatible endpoint. Set `AZURE_FOUNDRY_API_KEY`, then pass the deployment's Responses endpoint URL and deployment name together:
+
+```cpp
+auto model = cail::create_foundry_model({
+    .endpoint = "https://<resource>.cognitiveservices.azure.com/openai/responses"
+                 "?api-version=2025-04-01-preview",
+    .deployment = "my-deployment",
+});
+
+auto answer = cail::generate_text({
+    .model = model,
+    .prompt = "Reply with exactly OK.",
+});
+```
+
+Copy the endpoint URL and API version shown for your deployment in the Azure portal. The provider sends the deployment name as the model and supports streaming, tools, images, and typed structured output the same way the OpenAI provider does. Pass `.api_key` explicitly when you need to set the key other than through the environment.
+
+Run the prompt example:
+
+```sh
+cmake --build build --target cail_foundry_prompt
+./build/cail_foundry_prompt
+```
 
 ## Create embeddings
 

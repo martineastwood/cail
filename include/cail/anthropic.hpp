@@ -136,7 +136,7 @@ struct StreamBody {
     RequestBody body{.model = config.model, .max_tokens = config.max_tokens};
     if (streaming) body.stream = true;
     if (request.structured_output) {
-        auto schema = cail::detail::strict_schema(request.structured_output->schema);
+        auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
         if (!schema) return std::unexpected(schema.error());
         auto encoded = to_json(*schema);
         if (!encoded) return std::unexpected(encoded.error());
@@ -439,7 +439,7 @@ class AnthropicProvider {
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {
                 return client->stream(request, handler, stop);
-            }, LanguageModelCapabilities{
+            }, AdapterCapabilities{
                 .image_input = true, .tools = true, .structured_output = true, .reasoning = true}};
     }
 

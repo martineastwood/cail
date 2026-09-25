@@ -30,13 +30,13 @@ inline void make_nullable(Schema& schema) {
     }
 }
 
-[[nodiscard]] inline Result<Schema> strict_schema(const Schema& schema, bool root = true) {
+[[nodiscard]] inline Result<Schema> strict_json_schema(const Schema& schema, bool root = true) {
     if (root) {
         const auto* type = std::get_if<SchemaType>(&schema.type);
         if (type == nullptr || *type != SchemaType::object) {
             return std::unexpected(Error{
                 .code = ErrorCode::unsupported_schema,
-                .message = "OpenAI strict structured output requires a root object schema.",
+                .message = "Strict JSON Schema output requires a root object schema.",
             });
         }
     }
@@ -46,7 +46,7 @@ inline void make_nullable(Schema& schema) {
         if (!schema.properties || !schema.required || !schema.additional_properties || *schema.additional_properties) {
             return std::unexpected(Error{
                 .code = ErrorCode::unsupported_schema,
-                .message = "OpenAI strict structured output requires object properties, a required list, and "
+                .message = "Strict JSON Schema output requires object properties, a required list, and "
                            "additionalProperties=false.",
             });
         }
@@ -70,7 +70,7 @@ inline void make_nullable(Schema& schema) {
                     .message = "The structured output schema contains a null property schema.",
                 });
             }
-            auto strict_child = strict_schema(*child, false);
+            auto strict_child = strict_json_schema(*child, false);
             if (!strict_child) {
                 return std::unexpected(strict_child.error());
             }
@@ -88,10 +88,10 @@ inline void make_nullable(Schema& schema) {
         if (!schema.items) {
             return std::unexpected(Error{
                 .code = ErrorCode::unsupported_schema,
-                .message = "OpenAI structured output arrays require an items schema.",
+                .message = "Strict JSON Schema output arrays require an items schema.",
             });
         }
-        auto strict_items = strict_schema(*schema.items, false);
+        auto strict_items = strict_json_schema(*schema.items, false);
         if (!strict_items) {
             return std::unexpected(strict_items.error());
         }

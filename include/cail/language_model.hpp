@@ -9,13 +9,15 @@
 
 namespace cail {
 
-struct LanguageModelCapabilities {
-    bool streaming{};
-    bool image_input{};
-    bool tools{};
-    bool structured_output{};
-    bool reasoning{};
-    bool continuation{};
+// What a CAIL provider adapter can encode, decode, and stream for its API.
+// This does not guarantee that the selected model accepts every feature.
+struct AdapterCapabilities {
+    bool streaming{};         // The adapter implements streaming for this API.
+    bool image_input{};       // The adapter can encode image parts into requests.
+    bool tools{};             // The adapter can send tool definitions and parse tool calls.
+    bool structured_output{}; // The adapter can send JSON Schema output constraints.
+    bool reasoning{};         // The adapter can parse reasoning fields or deltas.
+    bool continuation{};      // The adapter supports continuation tokens on this API.
 };
 
 class LanguageModel {
@@ -27,14 +29,18 @@ class LanguageModel {
     LanguageModel() = default;
     explicit LanguageModel(GenerateFunction generate) : generate_(std::move(generate)) {}
     LanguageModel(GenerateFunction generate, StreamFunction stream,
-                  LanguageModelCapabilities capabilities = {})
-        : generate_(std::move(generate)), stream_(std::move(stream)), capabilities_(capabilities)
+                  AdapterCapabilities adapter_capabilities = {})
+        : generate_(std::move(generate)), stream_(std::move(stream)),
+          adapter_capabilities_(std::move(adapter_capabilities))
     {
-        capabilities_.streaming = static_cast<bool>(stream_);
+        adapter_capabilities_.streaming = static_cast<bool>(stream_);
     }
 
     [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(generate_); }
-    [[nodiscard]] const LanguageModelCapabilities& capabilities() const noexcept { return capabilities_; }
+    [[nodiscard]] const AdapterCapabilities& adapter_capabilities() const noexcept
+    {
+        return adapter_capabilities_;
+    }
 
     [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const
     {
@@ -76,7 +82,7 @@ class LanguageModel {
     private:
     GenerateFunction generate_;
     StreamFunction stream_;
-    LanguageModelCapabilities capabilities_;
+    AdapterCapabilities adapter_capabilities_;
 };
 
 } // namespace cail

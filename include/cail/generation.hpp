@@ -25,6 +25,8 @@ struct ToolCall {
     std::string id;
     std::string name;
     std::string arguments;
+    // Provider-specific round-trip data, such as Gemini thought signatures.
+    std::optional<std::string> provider_options;
 };
 
 struct ToolDefinition {

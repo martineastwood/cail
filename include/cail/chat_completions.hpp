@@ -175,7 +175,7 @@ struct ResponseBody {
         body.stream_options = RequestBody::StreamOptions{};
     }
     if (request.structured_output) {
-        auto schema = cail::detail::strict_schema(request.structured_output->schema);
+        auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
         if (!schema) return std::unexpected(schema.error());
         auto encoded = to_json(*schema);
         if (!encoded) return std::unexpected(encoded.error());
@@ -424,6 +424,16 @@ struct ChatCompletionsSettings {
     std::vector<HttpHeader> headers;
 };
 
+[[nodiscard]] constexpr AdapterCapabilities chat_completions_adapter_capabilities()
+{
+    return AdapterCapabilities{
+        .image_input = true,
+        .tools = true,
+        .structured_output = true,
+        .reasoning = true,
+    };
+}
+
 class ChatCompletionsProvider {
 public:
     explicit ChatCompletionsProvider(ChatCompletionsSettings settings) : settings_(std::move(settings)) {}
@@ -435,12 +445,7 @@ public:
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {
                 return client->stream(request, handler, stop);
-            }, LanguageModelCapabilities{
-                .image_input = true,
-                .tools = true,
-                .structured_output = true,
-                .reasoning = true,
-            }};
+            }, chat_completions_adapter_capabilities()};
     }
 private:
     ChatCompletionsSettings settings_;

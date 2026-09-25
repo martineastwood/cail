@@ -144,6 +144,9 @@ if(CAIL_BUILD_EXAMPLES)
 
     add_executable(cail_ollama_cloud_prompt examples/ollama_cloud_prompt.cpp)
     target_link_libraries(cail_ollama_cloud_prompt PRIVATE cail::cail)
+
+    add_executable(cail_foundry_prompt examples/foundry_prompt.cpp)
+    target_link_libraries(cail_foundry_prompt PRIVATE cail::cail)
 endif()
 
 if(BUILD_TESTING)
