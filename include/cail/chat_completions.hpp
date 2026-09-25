@@ -2,6 +2,7 @@
 
 #include <cail/detail/base64.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/detail/http_context.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -243,7 +244,7 @@ struct ResponseBody {
                                                      .message = "An image requires a MIME type."});
                     }
                     encoded = to_json(ImagePart{.image_url = ImageUrl{
-                        .url = "data:" + image->mime_type + ";base64," + cail::detail::base64_encode(image->bytes)}});
+                        .url = cail::detail::image_data_url(image->mime_type, image->bytes)}});
                 }
                 if (!encoded) return std::unexpected(encoded.error());
                 parts.emplace_back(std::move(*encoded));
@@ -284,8 +285,6 @@ public:
     [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
         const StreamHandler& on_event, std::stop_token stop = {}) const
     {
-        if (!on_event) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                                     .message = "Streaming requires an event handler."});
         return run(request, on_event, stop);
     }
 
@@ -293,7 +292,7 @@ private:
     [[nodiscard]] Result<GenerationResponse> run(const GenerationRequest& request,
         const StreamHandler& on_event, std::stop_token stop) const
     {
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled, .message = "Cancelled."});
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         if (endpoint_.empty() || !transport_) return std::unexpected(Error{
             .code = ErrorCode::invalid_configuration, .message = "Chat Completions requires an endpoint and transport."});
         auto body = encode(request, model_, static_cast<bool>(on_event));
@@ -371,13 +370,9 @@ private:
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled, .message = "Cancelled."});
-        const auto context = [&](Error error) -> Result<GenerationResponse> {
-            error.http_status = response->status_code;
-            for (const auto& header : response->headers) {
-                if (header.name == "x-request-id" || header.name == "X-Request-Id") error.request_id = header.value;
-            }
-            return std::unexpected(std::move(error));
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
+        const auto context = [&](Error error) {
+            return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
         };
         if (response->status_code < 200 || response->status_code >= 300) {
             ErrorBody error_body;

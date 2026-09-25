@@ -37,4 +37,9 @@ struct Error {
 template <typename T>
 using Result = std::expected<T, Error>;
 
+[[nodiscard]] inline Error generation_cancelled_error()
+{
+    return Error{.code = ErrorCode::cancelled, .message = "Generation was cancelled."};
+}
+
 } // namespace cail

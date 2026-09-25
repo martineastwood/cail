@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/detail/http_context.hpp>
 #include <cail/embedding_model.hpp>
 #include <cail/json.hpp>
 
@@ -61,10 +62,6 @@ class EmbeddingClient {
             return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                          .message = "OpenAI embeddings require an API key, model, base URL, transport, and positive dimensions."});
         }
-        if (inputs.empty() || std::ranges::any_of(inputs, [](const auto& input) { return input.empty(); })) {
-            return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                         .message = "Embedding requires non-empty inputs."});
-        }
         auto encoded = to_json(EmbeddingRequestBody{.model = model_, .input = inputs, .dimensions = dimensions_});
         if (!encoded) return std::unexpected(encoded.error());
         auto response = transport_->send(HttpRequest{
@@ -74,12 +71,8 @@ class EmbeddingClient {
             .body = std::move(*encoded),
         });
         if (!response) return std::unexpected(response.error());
-        const auto context = [&](Error error) -> Result<EmbeddingBatch> {
-            error.http_status = response->status_code;
-            for (const auto& header : response->headers) {
-                if (header.name == "x-request-id" || header.name == "X-Request-Id") error.request_id = header.value;
-            }
-            return std::unexpected(std::move(error));
+        const auto context = [&](Error error) {
+            return unexpected_with_http_context<EmbeddingBatch>(std::move(error), *response);
         };
         if (response->status_code < 200 || response->status_code >= 300) {
             EmbeddingErrorBody body;

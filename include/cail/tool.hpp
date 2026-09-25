@@ -34,12 +34,6 @@ class Tool {
     [[nodiscard]] const ToolDefinition& definition() const noexcept { return definition_; }
 
     [[nodiscard]] Result<std::string> execute(const ToolCall& call, const ToolContext& context) const {
-        if (!executor_) {
-            return std::unexpected(Error{
-                .code = ErrorCode::tool_execution,
-                .message = "Tool has no execute handler: " + definition_.name,
-            });
-        }
         try {
             return executor_(call, context);
         } catch (const std::exception& error) {

@@ -23,4 +23,9 @@ namespace cail::detail {
     return result;
 }
 
+[[nodiscard]] inline std::string image_data_url(std::string_view mime_type, std::string_view bytes)
+{
+    return "data:" + std::string{mime_type} + ";base64," + base64_encode(bytes);
+}
+
 } // namespace cail::detail

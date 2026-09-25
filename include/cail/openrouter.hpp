@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cail/chat_completions.hpp>
+#include <cail/detail/env.hpp>
 
-#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,12 +20,7 @@ class OpenRouterProvider {
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
-        auto key = settings_.api_key;
-        if (key.empty()) {
-            if (const char* env = std::getenv("OPENROUTER_API_KEY"); env && *env) {
-                key = env;
-            }
-        }
+        auto key = detail::env_or(settings_.api_key, "OPENROUTER_API_KEY");
         return create_chat_completions({
             .endpoint = "https://openrouter.ai/api/v1/chat/completions",
             .api_key = std::move(key),

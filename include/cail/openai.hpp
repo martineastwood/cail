@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cail/detail/base64.hpp>
+#include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/detail/http_context.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -13,8 +15,6 @@
 #include <glaze/glaze.hpp>
 
 #include <algorithm>
-#include <cctype>
-#include <cstdlib>
 #include <map>
 #include <memory>
 #include <optional>
@@ -32,7 +32,7 @@ struct Config {
     std::string base_url{"https://api.openai.com/v1"};
 };
 
-namespace detail {
+namespace wire {
 
 struct InputMessage {
     std::string role;
@@ -294,7 +294,7 @@ struct StreamEventBody {
                 });
             }
             encoded = to_json(InputImagePart{
-                .image_url = "data:" + image.mime_type + ";base64," + cail::detail::base64_encode(image.bytes),
+                .image_url = cail::detail::image_data_url(image.mime_type, image.bytes),
             });
         }
         if (!encoded) {
@@ -310,7 +310,7 @@ struct StreamEventBody {
 }
 
 
-} // namespace detail
+} // namespace wire
 
 class Client {
     public:
@@ -325,12 +325,6 @@ class Client {
 
     [[nodiscard]] Result<GenerationResponse> stream(
         const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop = {}) const {
-        if (!on_event) {
-            return std::unexpected(Error{
-                .code = ErrorCode::invalid_configuration,
-                .message = "Streaming requires an event handler.",
-            });
-        }
         return generate_impl(request, on_event, stop);
     }
 
@@ -346,7 +340,7 @@ class Client {
         const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop = {}) const {
         const bool streaming = static_cast<bool>(on_event);
         if (stop.stop_requested()) {
-            return std::unexpected(Error{.code = ErrorCode::cancelled, .message = "Generation was cancelled."});
+            return std::unexpected(generation_cancelled_error());
         }
         if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() || !transport_) {
             return std::unexpected(Error{
@@ -363,7 +357,7 @@ class Client {
             });
         }
 
-        detail::RequestBody body{
+        wire::RequestBody body{
             .model = config_.model,
         };
         if (streaming) {
@@ -397,11 +391,11 @@ class Client {
                         .message = "A tool result requires a tool call ID and cannot contain tool calls.",
                     });
                 }
-                auto output = detail::text_content(message);
+                auto output = wire::text_content(message);
                 if (!output) {
                     return std::unexpected(output.error());
                 }
-                if (auto result = append_input(detail::FunctionCallOutputInput{
+                if (auto result = append_input(wire::FunctionCallOutputInput{
                         .call_id = message.tool_call_id,
                         .output = std::move(*output),
                     });
@@ -411,7 +405,7 @@ class Client {
                 continue;
             }
 
-            const auto role = detail::role_name(message.role);
+            const auto role = wire::role_name(message.role);
             if (role.empty() || !message.tool_call_id.empty()) {
                 return std::unexpected(Error{
                     .code = ErrorCode::invalid_configuration,
@@ -426,11 +420,11 @@ class Client {
             }
 
             if (message.tool_calls.empty() || !message.content.empty()) {
-                auto content = detail::input_content(message);
+                auto content = wire::input_content(message);
                 if (!content) {
                     return std::unexpected(content.error());
                 }
-                if (auto result = append_input(detail::InputMessage{
+                if (auto result = append_input(wire::InputMessage{
                         .role = std::string{role},
                         .content = std::move(*content),
                     });
@@ -445,7 +439,7 @@ class Client {
                         .message = "An assistant tool call requires an ID, name, and JSON arguments.",
                     });
                 }
-                if (auto result = append_input(detail::FunctionCallInput{
+                if (auto result = append_input(wire::FunctionCallInput{
                         .call_id = tool_call.id,
                         .name = tool_call.name,
                         .arguments = tool_call.arguments,
@@ -483,7 +477,7 @@ class Client {
                 if (!encoded_parameters) {
                     return std::unexpected(encoded_parameters.error());
                 }
-                body.tools->push_back(detail::FunctionTool{
+                body.tools->push_back(wire::FunctionTool{
                     .name = tool.name,
                     .description = tool.description,
                     .parameters = glz::raw_json{std::move(*encoded_parameters)},
@@ -500,9 +494,9 @@ class Client {
             if (!encoded_schema) {
                 return std::unexpected(encoded_schema.error());
             }
-            body.text = detail::TextOptions{
+            body.text = wire::TextOptions{
                 .format =
-                    detail::JsonSchemaFormat{
+                    wire::JsonSchemaFormat{
                         .name = request.structured_output->name,
                         .description = request.structured_output->description,
                         .schema = glz::raw_json{std::move(*encoded_schema)},
@@ -533,14 +527,14 @@ class Client {
         };
 
         cail::detail::SseParser sse_parser;
-        std::optional<detail::ResponseBody> streamed_response;
+        std::optional<wire::ResponseBody> streamed_response;
         std::optional<Error> stream_error;
         std::string reasoning;
         const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
             if (stop.stop_requested() || stream_error || event.data.empty() || event.data == "[DONE]") {
                 return;
             }
-            detail::StreamEventBody stream_event{};
+            wire::StreamEventBody stream_event{};
             if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(stream_event, event.data); error) {
                 stream_error = Error{
                     .code = ErrorCode::provider_response,
@@ -591,24 +585,13 @@ class Client {
             return std::unexpected(http_response.error());
         }
         const auto with_context = [&](Error error) {
-            error.http_status = http_response->status_code;
-            for (const auto& header : http_response->headers) {
-                std::string name = header.name;
-                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character) {
-                    return static_cast<char>(std::tolower(character));
-                });
-                if (name == "x-request-id") {
-                    error.request_id = header.value;
-                    break;
-                }
-            }
-            return std::unexpected(std::move(error));
+            return unexpected_with_http_context<GenerationResponse>(std::move(error), *http_response);
         };
         if (stop.stop_requested()) {
-            return with_context(Error{.code = ErrorCode::cancelled, .message = "Generation was cancelled."});
+            return with_context(generation_cancelled_error());
         }
         if (http_response->status_code < 200 || http_response->status_code >= 300) {
-            detail::ErrorBody error_body{};
+            wire::ErrorBody error_body{};
             const auto parse_error = glz::read<glz::opts{.error_on_unknown_keys = false}>(
                 error_body, http_response->body);
             const auto message = !parse_error && error_body.error ? error_body.error->message : http_response->body;
@@ -643,7 +626,7 @@ class Client {
                     call_indexes.push_back(index);
                 }
             }
-            auto result = detail::decode_response(std::move(*streamed_response), http_response->status_code);
+            auto result = wire::decode_response(std::move(*streamed_response), http_response->status_code);
             if (!result) {
                 return with_context(result.error());
             }
@@ -662,7 +645,7 @@ class Client {
             return result;
         }
 
-        detail::ResponseBody response_body{};
+        wire::ResponseBody response_body{};
         if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(
                 response_body, http_response->body);
             error) {
@@ -674,7 +657,7 @@ class Client {
             });
         }
 
-        auto result = detail::decode_response(std::move(response_body), http_response->status_code);
+        auto result = wire::decode_response(std::move(response_body), http_response->status_code);
         if (!result) {
             return with_context(result.error());
         }
@@ -767,12 +750,7 @@ class OpenAIProvider {
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
-        auto api_key = settings_.api_key;
-        if (api_key.empty()) {
-            if (const char* env = std::getenv("OPENAI_API_KEY"); env != nullptr && env[0] != '\0') {
-                api_key = env;
-            }
-        }
+        auto api_key = detail::env_or(settings_.api_key, "OPENAI_API_KEY");
         auto client = std::make_shared<detail::openai::Client>(detail::openai::Config{
             .api_key = std::move(api_key),
             .model = std::move(model_id),
@@ -794,12 +772,7 @@ class OpenAIProvider {
     [[nodiscard]] EmbeddingModel embedding_model(
         std::string model_id, std::optional<std::size_t> dimensions = std::nullopt) const
     {
-        auto api_key = settings_.api_key;
-        if (api_key.empty()) {
-            if (const char* env = std::getenv("OPENAI_API_KEY"); env != nullptr && env[0] != '\0') {
-                api_key = env;
-            }
-        }
+        auto api_key = detail::env_or(settings_.api_key, "OPENAI_API_KEY");
         auto client = std::make_shared<detail::openai::EmbeddingClient>(
             std::move(api_key), std::move(model_id), settings_.base_url, dimensions);
         return EmbeddingModel{[client](const std::vector<std::string>& inputs) {

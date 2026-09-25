@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cail/detail/base64.hpp>
+#include <cail/detail/encode_json.hpp>
+#include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/detail/http_context.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -10,7 +13,6 @@
 
 #include <glaze/glaze.hpp>
 
-#include <cstdlib>
 #include <map>
 #include <memory>
 #include <optional>
@@ -121,14 +123,6 @@ struct StreamBody {
     std::optional<ProviderError> error;
 };
 
-[[nodiscard]] inline Result<void> append(std::vector<glz::raw_json>& blocks, const auto& block)
-{
-    auto encoded = to_json(block);
-    if (!encoded) return std::unexpected(encoded.error());
-    blocks.emplace_back(std::move(*encoded));
-    return {};
-}
-
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, const Config& config, bool streaming)
 {
     if (request.messages.empty()) {
@@ -179,7 +173,7 @@ struct StreamBody {
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                                              .message = "Anthropic tool results require a call ID and one text part."});
             }
-            auto added = append(item.content, ToolResultBlock{
+            auto added = append_json(item.content, ToolResultBlock{
                 .tool_use_id = message.tool_call_id,
                 .content = std::get<cail::TextPart>(message.content.front()).text});
             if (!added) return std::unexpected(added.error());
@@ -192,14 +186,14 @@ struct StreamBody {
             for (const auto& part : message.content) {
                 Result<void> added;
                 if (const auto* text = std::get_if<cail::TextPart>(&part)) {
-                    added = append(item.content, TextBlock{.text = text->text});
+                    added = append_json(item.content, TextBlock{.text = text->text});
                 } else {
                     const auto& image = std::get<cail::ImagePart>(part);
                     if (message.role != MessageRole::user || image.mime_type.empty() || image.bytes.empty()) {
                         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                                      .message = "Anthropic images require user content, bytes, and a MIME type."});
                     }
-                    added = append(item.content, ImageBlock{.source = ImageSource{
+                    added = append_json(item.content, ImageBlock{.source = ImageSource{
                         .media_type = image.mime_type, .data = cail::detail::base64_encode(image.bytes)}});
                 }
                 if (!added) return std::unexpected(added.error());
@@ -210,7 +204,7 @@ struct StreamBody {
                     return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                                                  .message = "Anthropic assistant tool calls require an ID, name, and JSON arguments."});
                 }
-                auto added = append(item.content, ToolUseBlock{
+                auto added = append_json(item.content, ToolUseBlock{
                     .id = call.id, .name = call.name, .input = glz::raw_json{call.arguments}});
                 if (!added) return std::unexpected(added.error());
             }
@@ -293,8 +287,6 @@ class Client {
     [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
         const StreamHandler& on_event, std::stop_token stop = {}) const
     {
-        if (!on_event) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                                     .message = "Streaming requires an event handler."});
         return run(request, on_event, stop);
     }
 
@@ -302,8 +294,7 @@ class Client {
     [[nodiscard]] Result<GenerationResponse> run(const GenerationRequest& request,
         const StreamHandler& on_event, std::stop_token stop) const
     {
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled,
-                                                                 .message = "Generation was cancelled."});
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
             config_.max_tokens == 0 || !transport_) {
             return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -393,14 +384,9 @@ class Client {
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled,
-                                                                 .message = "Generation was cancelled."});
-        const auto context = [&](Error error) -> Result<GenerationResponse> {
-            error.http_status = response->status_code;
-            for (const auto& header : response->headers) {
-                if (header.name == "request-id" || header.name == "Request-Id") error.request_id = header.value;
-            }
-            return std::unexpected(std::move(error));
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
+        const auto context = [&](Error error) {
+            return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
         };
         if (response->status_code < 200 || response->status_code >= 300) {
             ErrorBody error_body;
@@ -445,10 +431,7 @@ class AnthropicProvider {
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
-        auto key = settings_.api_key;
-        if (key.empty()) {
-            if (const char* env = std::getenv("ANTHROPIC_API_KEY"); env && *env) key = env;
-        }
+        auto key = detail::env_or(settings_.api_key, "ANTHROPIC_API_KEY");
         auto client = std::make_shared<detail::anthropic::Client>(detail::anthropic::Config{
             .api_key = std::move(key), .model = std::move(model_id), .base_url = settings_.base_url,
             .max_tokens = settings_.max_tokens, .headers = settings_.headers});

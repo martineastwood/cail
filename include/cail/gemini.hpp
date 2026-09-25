@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cail/detail/base64.hpp>
+#include <cail/detail/encode_json.hpp>
+#include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/detail/http_context.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
@@ -9,7 +12,6 @@
 
 #include <glaze/glaze.hpp>
 
-#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <stop_token>
@@ -68,15 +70,6 @@ struct ResponseBody {
 struct ProviderError { std::string message; std::optional<std::string> status; };
 struct ErrorBody { std::optional<ProviderError> error; };
 
-template <typename T>
-[[nodiscard]] inline Result<void> append(std::vector<glz::raw_json>& parts, const T& part)
-{
-    auto encoded = to_json(part);
-    if (!encoded) return std::unexpected(encoded.error());
-    parts.emplace_back(std::move(*encoded));
-    return {};
-}
-
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request)
 {
     if (request.messages.empty() || request.continuation_token)
@@ -96,7 +89,7 @@ template <typename T>
                 const auto* value = std::get_if<cail::TextPart>(&part);
                 if (!value) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                     .message = "Gemini system instructions must contain text."});
-                if (auto added = append(system.parts, TextPart{.text = value->text}); !added)
+                if (auto added = append_json(system.parts, TextPart{.text = value->text}); !added)
                     return std::unexpected(added.error());
             }
             body.systemInstruction = std::move(system);
@@ -119,7 +112,7 @@ template <typename T>
                     .message = "Gemini tool result requires a known call ID and JSON output."});
             auto state = from_json<CallState>(message.tool_call_id);
             if (!state) return std::unexpected(state.error());
-            auto added = append(body.contents.emplace_back(Content{.role = "user"}).parts,
+            auto added = append_json(body.contents.emplace_back(Content{.role = "user"}).parts,
                 ResultPart{.functionResponse = FunctionResponse{
                     .name = name, .response = glz::raw_json{output}, .id = state->id}});
             if (!added) return std::unexpected(added.error());
@@ -129,10 +122,10 @@ template <typename T>
         for (const auto& part : message.content) {
             Result<void> added;
             if (const auto* value = std::get_if<cail::TextPart>(&part))
-                added = append(content.parts, TextPart{.text = value->text});
+                added = append_json(content.parts, TextPart{.text = value->text});
             else {
                 const auto& image = std::get<cail::ImagePart>(part);
-                added = append(content.parts, ImagePart{.inlineData = InlineData{
+                added = append_json(content.parts, ImagePart{.inlineData = InlineData{
                     .mimeType = image.mime_type, .data = cail::detail::base64_encode(image.bytes)}});
             }
             if (!added) return std::unexpected(added.error());
@@ -146,7 +139,7 @@ template <typename T>
                     .message = "Gemini function calls require a name and JSON arguments."});
             auto state = from_json<CallState>(call.id);
             if (!state) return std::unexpected(state.error());
-            auto added = append(content.parts, CallPart{
+            auto added = append_json(content.parts, CallPart{
                 .functionCall = FunctionCall{
                     .name = call.name, .args = glz::raw_json{call.arguments}, .id = state->id},
                 .thoughtSignature = state->signature});
@@ -240,8 +233,6 @@ public:
     [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
         const StreamHandler& handler, std::stop_token stop = {}) const
     {
-        if (!handler) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-            .message = "Streaming requires an event handler."});
         return run(request, handler, stop);
     }
 
@@ -249,8 +240,7 @@ private:
     [[nodiscard]] Result<GenerationResponse> run(const GenerationRequest& request,
         const StreamHandler& handler, std::stop_token stop) const
     {
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled,
-            .message = "Generation was cancelled."});
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() || !transport_)
             return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                 .message = "Gemini requires an API key, model, base URL, and transport."});
@@ -285,13 +275,9 @@ private:
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
-        if (stop.stop_requested()) return std::unexpected(Error{.code = ErrorCode::cancelled,
-            .message = "Generation was cancelled."});
-        const auto context = [&](Error error) -> Result<GenerationResponse> {
-            error.http_status = response->status_code;
-            for (const auto& header : response->headers)
-                if (header.name == "x-request-id" || header.name == "X-Request-Id") error.request_id = header.value;
-            return std::unexpected(std::move(error));
+        if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
+        const auto context = [&](Error error) {
+            return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
         };
         if (response->status_code < 200 || response->status_code >= 300) {
             ErrorBody error;
@@ -335,8 +321,7 @@ public:
     explicit GeminiProvider(GeminiSettings settings = {}) : settings_(std::move(settings)) {}
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
-        auto key = settings_.api_key;
-        if (key.empty()) if (const char* env = std::getenv("GEMINI_API_KEY"); env && *env) key = env;
+        auto key = detail::env_or(settings_.api_key, "GEMINI_API_KEY");
         auto client = std::make_shared<detail::gemini::Client>(detail::gemini::Config{
             .api_key = std::move(key), .model = std::move(model_id),
             .base_url = settings_.base_url, .headers = settings_.headers});
