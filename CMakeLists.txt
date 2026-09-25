@@ -135,6 +135,15 @@ if(CAIL_BUILD_EXAMPLES)
 
     add_executable(cail_gemini_tool_call examples/gemini_tool_call.cpp)
     target_link_libraries(cail_gemini_tool_call PRIVATE cail::cail)
+
+    add_executable(cail_mistral_prompt examples/mistral_prompt.cpp)
+    target_link_libraries(cail_mistral_prompt PRIVATE cail::cail)
+
+    add_executable(cail_hyper_prompt examples/hyper_prompt.cpp)
+    target_link_libraries(cail_hyper_prompt PRIVATE cail::cail)
+
+    add_executable(cail_ollama_cloud_prompt examples/ollama_cloud_prompt.cpp)
+    target_link_libraries(cail_ollama_cloud_prompt PRIVATE cail::cail)
 endif()
 
 if(BUILD_TESTING)

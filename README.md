@@ -30,7 +30,7 @@ Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
 
 ## Current implementation
 
-The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Anthropic, and Gemini providers. It targets C++23.
+The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Anthropic, Gemini, Mistral, Charm Hyper, and Ollama Cloud providers. It targets C++23.
 
 `magic_enum` supplies enum names because Glaze's C++23 mode serializes enums as integers by default. Glaze remains the backend for struct reflection and JSON conversion.
 
@@ -145,6 +145,50 @@ cmake --build build --target cail_openrouter_prompt cail_openrouter_stream cail_
 ```
 
 Set `OPENROUTER_API_KEY` in your environment before running either example.
+
+## Use Mistral or Charm Hyper
+
+Set `MISTRAL_API_KEY` or `HYPER_API_KEY`, then choose a model:
+
+```cpp
+auto mistral = cail::mistral("mistral-vibe-cli-with-tools");
+auto hyper = cail::hyper("deepseek-v4-flash");
+
+auto answer = cail::generate_text({
+    .model = mistral,
+    .prompt = "Reply with exactly OK.",
+});
+```
+
+Both providers use CAIL's Chat Completions features, including text streaming and tools. Model support for images and structured output varies. Use `cail::create_mistral({.api_key = key})` or `cail::create_hyper({.api_key = key})` to pass a key or extra headers explicitly.
+
+Run the complete prompt examples:
+
+```sh
+cmake --build build --target cail_mistral_prompt cail_hyper_prompt
+./build/cail_mistral_prompt
+./build/cail_hyper_prompt
+```
+
+## Use Ollama Cloud
+
+Set `OLLAMA_API_KEY`, then select a cloud model:
+
+```cpp
+auto answer = cail::generate_text({
+    .model = cail::ollama_cloud("gemma4:31b"),
+    .prompt = "Reply with exactly OK.",
+});
+```
+
+Ollama Cloud uses CAIL's Chat Completions features, including streaming and tools. Available features depend on the model. Use `cail::create_ollama_cloud({.api_key = key})` to pass a key or extra headers explicitly.
+
+Run the prompt example:
+
+```sh
+cmake --build build --target cail_ollama_cloud_prompt
+./build/cail_ollama_cloud_prompt
+```
 
 ## Use Anthropic
 

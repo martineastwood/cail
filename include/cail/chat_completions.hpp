@@ -100,7 +100,7 @@ struct OutputMessage {
     std::optional<std::string> content;
     std::optional<std::string> refusal;
     std::optional<std::string> reasoning_content;
-    std::vector<ToolCall> tool_calls;
+    std::optional<std::vector<ToolCall>> tool_calls;
 };
 struct Choice {
     std::size_t index{};
@@ -143,13 +143,15 @@ struct ResponseBody {
         return std::unexpected(Error{.code = ErrorCode::provider_response,
                                      .message = "Chat Completions returned an unsupported finish reason."});
     }
-    for (const auto& call : message.tool_calls) {
-        if (call.id.empty() || call.function.name.empty()) {
-            return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                         .message = "Chat Completions returned an incomplete tool call."});
+    if (message.tool_calls) {
+        for (const auto& call : *message.tool_calls) {
+            if (call.id.empty() || call.function.name.empty()) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                                             .message = "Chat Completions returned an incomplete tool call."});
+            }
+            result.tool_calls.push_back(cail::ToolCall{.id = call.id, .name = call.function.name,
+                                                       .arguments = call.function.arguments});
         }
-        result.tool_calls.push_back(cail::ToolCall{.id = call.id, .name = call.function.name,
-                                                   .arguments = call.function.arguments});
     }
     if (body.usage) {
         result.usage = usage(*body.usage);
@@ -345,15 +347,17 @@ private:
                         partial.reasoning += *delta.reasoning_content;
                         on_event(StreamEvent{ReasoningDelta{.text = *delta.reasoning_content}});
                     }
-                    for (std::size_t index = 0; index < delta.tool_calls.size(); ++index) {
-                        const auto& call = delta.tool_calls[index];
-                        const auto call_index = call.index.value_or(index);
-                        auto& pending = pending_calls[call_index];
-                        if (!call.id.empty()) pending.id = call.id;
-                        if (!call.function.name.empty()) pending.name = call.function.name;
-                        pending.arguments += call.function.arguments;
-                        if (!call.function.arguments.empty()) on_event(StreamEvent{ToolCallArgumentsDelta{
-                            .output_index = call_index, .arguments = call.function.arguments}});
+                    if (delta.tool_calls) {
+                        for (std::size_t index = 0; index < delta.tool_calls->size(); ++index) {
+                            const auto& call = (*delta.tool_calls)[index];
+                            const auto call_index = call.index.value_or(index);
+                            auto& pending = pending_calls[call_index];
+                            if (!call.id.empty()) pending.id = call.id;
+                            if (!call.function.name.empty()) pending.name = call.function.name;
+                            pending.arguments += call.function.arguments;
+                            if (!call.function.arguments.empty()) on_event(StreamEvent{ToolCallArgumentsDelta{
+                                .output_index = call_index, .arguments = call.function.arguments}});
+                        }
                     }
                 }
                 if (choice.finish_reason) {

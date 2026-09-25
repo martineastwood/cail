@@ -38,7 +38,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ])
         elif self.path == "/chat":
             self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop",
-                                             "message": {"content": "Hello"}}]})
+                                             "message": {"content": "Hello", "tool_calls": None}}]})
         elif self.path == "/responses" and body.get("stream"):
             self.send_stream([
                 'event: response.output_text.delta\ndata: {"delta":"Hi"}\n\n',

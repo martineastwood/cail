@@ -19,7 +19,11 @@ int main()
     const auto model = cail::openrouter("openai/gpt-4o-mini");
     const auto anthropic = cail::anthropic("claude-haiku-4-5-20251001");
     const auto gemini = cail::gemini("gemini-3.5-flash-lite");
+    const auto mistral = cail::mistral("mistral-vibe-cli-with-tools");
+    const auto hyper = cail::hyper("deepseek-v4-flash");
+    const auto ollama_cloud = cail::ollama_cloud("gemma4:31b");
     return decoded && decoded->confidence.value == 0.8 && decoded->explanation == "clear" &&
                    model.capabilities().structured_output && anthropic.capabilities().tools &&
-                   gemini.capabilities().streaming ? 0 : 1;
+                   gemini.capabilities().streaming && mistral.capabilities().tools &&
+                   hyper.capabilities().streaming && ollama_cloud.capabilities().tools ? 0 : 1;
 }

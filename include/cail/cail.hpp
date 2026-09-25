@@ -2,6 +2,7 @@
 
 #include <cail/anthropic.hpp>
 #include <cail/gemini.hpp>
+#include <cail/hyper.hpp>
 #include <cail/error.hpp>
 #include <cail/chat_completions.hpp>
 #include <cail/embedding_model.hpp>
@@ -10,6 +11,8 @@
 #include <cail/generation.hpp>
 #include <cail/http.hpp>
 #include <cail/language_model.hpp>
+#include <cail/mistral.hpp>
+#include <cail/ollama_cloud.hpp>
 #include <cail/json.hpp>
 #include <cail/openai.hpp>
 #include <cail/openrouter.hpp>
