@@ -175,18 +175,20 @@ template <typename Client>
                 .message = "The model exceeded the configured tool-call round limit.",
             });
         }
-        if (!response->continuation_token) {
-            return std::unexpected(Error{
-                .code = ErrorCode::provider_response,
-                .message = "The provider did not return continuation state for its tool calls.",
-            });
-        }
-
         GenerationRequest follow_up{
             .tools = request.tools,
             .structured_output = request.structured_output,
             .continuation_token = response->continuation_token,
         };
+        if (!response->continuation_token) {
+            follow_up.messages = request.messages;
+            follow_up.messages.push_back(Message{
+                .role = MessageRole::assistant,
+                .content = response->text.empty() ? std::vector<ContentPart>{}
+                                                  : std::vector<ContentPart>{TextPart{.text = response->text}},
+                .tool_calls = response->tool_calls,
+            });
+        }
         for (const auto& call : response->tool_calls) {
             const auto tool = std::ranges::find_if(tools, [&call](const auto& candidate) {
                 return candidate.definition().name == call.name;
@@ -209,12 +211,13 @@ template <typename Client>
             });
             follow_up.messages.push_back(Message{
                 .role = MessageRole::tool,
-                .content = std::move(*output),
+                .content = {TextPart{.text = std::move(*output)}},
                 .tool_call_id = call.id,
             });
         }
 
         ++round;
+        request = follow_up;
         response = client.generate(follow_up);
         if (!response) {
             return std::unexpected(response.error());

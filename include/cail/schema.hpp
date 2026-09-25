@@ -6,6 +6,7 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <algorithm>
 #include <concepts>
 #include <cstddef>
 #include <map>
@@ -15,6 +16,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace cail {
@@ -26,10 +28,11 @@ enum class SchemaType {
     integer,
     number,
     boolean,
+    null,
 };
 
 struct Schema {
-    SchemaType type{SchemaType::string};
+    std::variant<SchemaType, std::vector<SchemaType>> type{SchemaType::string};
     std::optional<std::string> description;
     std::optional<double> minimum;
     std::optional<double> maximum;
@@ -119,11 +122,23 @@ template <typename T>
     }
     else if constexpr (is_optional_v<Value>) {
         using Underlying = typename optional_traits<Value>::value_type;
+        Schema result;
         if (value) {
-            return make_schema(*value);
+            result = make_schema(*value);
+        } else {
+            Underlying default_value{};
+            result = make_schema(default_value);
         }
-        Underlying default_value{};
-        return make_schema(default_value);
+
+        if (auto* type = std::get_if<SchemaType>(&result.type)) {
+            result.type = std::vector<SchemaType>{*type, SchemaType::null};
+        } else {
+            auto& types = std::get<std::vector<SchemaType>>(result.type);
+            if (std::find(types.begin(), types.end(), SchemaType::null) == types.end()) {
+                types.emplace_back(SchemaType::null);
+            }
+        }
+        return result;
     }
     else if constexpr (std::is_same_v<Value, std::string> ||
                        std::is_same_v<Value, std::string_view>) {

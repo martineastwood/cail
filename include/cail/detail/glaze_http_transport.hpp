@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -49,7 +50,11 @@ class GlazeHttpTransport final : public HttpTransport {
         return result;
     }
 
-    [[nodiscard]] Result<HttpResponse> stream(const HttpRequest& request, const HttpDataHandler& on_data) override {
+    [[nodiscard]] Result<HttpResponse> stream(
+        const HttpRequest& request, const HttpDataHandler& on_data, std::stop_token stop) override {
+        if (stop.stop_requested()) {
+            return std::unexpected(Error{.code = ErrorCode::cancelled, .message = "The HTTP stream was cancelled."});
+        }
         struct State {
             HttpResponse response;
             std::optional<std::error_code> error;
@@ -71,8 +76,8 @@ class GlazeHttpTransport final : public HttpTransport {
             .strategy = glz::stream_read_strategy::immediate_delivery,
             .body = request.body,
             .headers = std::move(headers),
-            .on_data = [state, on_data](std::string_view bytes) {
-                if (!state->callback_error && on_data) {
+            .on_data = [state, on_data, stop](std::string_view bytes) {
+                if (!stop.stop_requested() && !state->callback_error && on_data) {
                     try {
                         on_data(bytes);
                     } catch (...) {
@@ -85,6 +90,9 @@ class GlazeHttpTransport final : public HttpTransport {
                     state->error = error;
                 }
             },
+            .on_progress = [state, stop](std::size_t, std::size_t) {
+                return !stop.stop_requested() && !state->callback_error;
+            },
             .on_connect = [state](const glz::response& response) {
                 state->response.status_code = response.status_code;
                 state->response.headers.reserve(response.response_headers.size());
@@ -95,13 +103,18 @@ class GlazeHttpTransport final : public HttpTransport {
             .on_disconnect = [state] { std::call_once(state->finish, [state] { state->disconnected.set_value(); }); },
         };
 
-        if (!client_.stream_request_v2(params)) {
+        auto connection = client_.stream_request_v2(params);
+        if (!connection) {
             return std::unexpected(Error{
                 .code = ErrorCode::transport,
                 .message = "Glaze could not start the HTTP stream.",
             });
         }
+        std::stop_callback cancel_on_stop(stop, [connection] { connection->disconnect(); });
         done.wait();
+        if (stop.stop_requested()) {
+            return std::unexpected(Error{.code = ErrorCode::cancelled, .message = "The HTTP stream was cancelled."});
+        }
         if (state->callback_error) {
             return std::unexpected(Error{
                 .code = ErrorCode::transport,

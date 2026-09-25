@@ -14,8 +14,10 @@ int main()
         "receive string chunks as they arrive from the network.";
     const std::string prompt =
         std::string("Summarize the main idea of this paragraph:\n\n") + std::string(paragraph);
-    auto response = model.stream(prompt, [](std::string_view delta) {
-        std::cout << delta << std::flush;
+    auto response = model.stream(prompt, [](const cail::StreamEvent& event) {
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+            std::cout << delta->text << std::flush;
+        }
     });
     if (!response) {
         std::cerr << response.error().message << '\n';

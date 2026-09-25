@@ -3,6 +3,7 @@
 #include <cail/error.hpp>
 
 #include <functional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,7 +36,8 @@ class HttpTransport {
 
     [[nodiscard]] virtual Result<HttpResponse> send(const HttpRequest& request) = 0;
     // Delivers response body bytes incrementally; the returned body is not buffered.
-    [[nodiscard]] virtual Result<HttpResponse> stream(const HttpRequest& request, const HttpDataHandler& on_data) = 0;
+    [[nodiscard]] virtual Result<HttpResponse> stream(
+        const HttpRequest& request, const HttpDataHandler& on_data, std::stop_token stop) = 0;
 };
 
 } // namespace cail

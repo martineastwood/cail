@@ -1,0 +1,494 @@
+#include <cail/cail.hpp>
+
+#include <algorithm>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace test {
+
+int failures{};
+
+void check(bool condition, std::string_view message)
+{
+    if (!condition) {
+        std::cerr << "FAIL: " << message << '\n';
+        ++failures;
+    }
+}
+
+struct Address {
+    std::string city;
+};
+
+struct Profile {
+    std::string answer;
+    std::optional<int> confidence;
+    std::optional<Address> address;
+};
+
+struct ToolInput {
+    std::string query;
+    std::optional<int> limit;
+};
+
+struct ToolOutput {
+    int count{};
+};
+
+class StubTransport final : public cail::HttpTransport {
+    public:
+    cail::HttpResponse response{
+        .status_code = 200,
+        .body = R"({"status":"completed","output":[]})",
+    };
+    std::vector<std::string> chunks;
+    cail::HttpRequest request;
+
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& value) override
+    {
+        request = value;
+        return response;
+    }
+
+    [[nodiscard]] cail::Result<cail::HttpResponse> stream(
+        const cail::HttpRequest& value, const cail::HttpDataHandler& on_data, std::stop_token stop) override
+    {
+        request = value;
+        for (const auto& chunk : chunks) {
+            if (stop.stop_requested()) {
+                return std::unexpected(cail::Error{.code = cail::ErrorCode::cancelled, .message = "Cancelled."});
+            }
+            on_data(chunk);
+        }
+        if (stop.stop_requested()) {
+            return std::unexpected(cail::Error{.code = cail::ErrorCode::cancelled, .message = "Cancelled."});
+        }
+        return response;
+    }
+};
+
+class ScriptedClient {
+    public:
+    explicit ScriptedClient(std::vector<cail::GenerationResponse> responses)
+        : responses_(std::move(responses)) {}
+
+    [[nodiscard]] cail::Result<cail::GenerationResponse> generate(const cail::GenerationRequest& request) const
+    {
+        requests.push_back(request);
+        if (responses_.empty()) {
+            return std::unexpected(cail::Error{
+                .code = cail::ErrorCode::provider_response,
+                .message = "The test client ran out of scripted responses.",
+            });
+        }
+        auto response = std::move(responses_.front());
+        responses_.erase(responses_.begin());
+        return response;
+    }
+
+    mutable std::vector<cail::GenerationRequest> requests;
+
+    private:
+    mutable std::vector<cail::GenerationResponse> responses_;
+};
+
+void test_field_value_api()
+{
+    cail::Field<double> confidence{
+        .value = 0.5,
+        .description = "Confidence score",
+        .minimum = 0.0,
+        .maximum = 1.0,
+    };
+    check(confidence.value == 0.5, "field runtime value is read through .value");
+    confidence = 0.8;
+    check(confidence.value == 0.8, "field assignment updates its runtime value");
+    check(confidence.description == "Confidence score" && confidence.minimum == 0.0 && confidence.maximum == 1.0,
+          "field assignment preserves schema metadata");
+}
+
+void test_optional_schema_and_json()
+{
+    const auto output_schema = cail::schema<Profile>();
+    check(output_schema.properties.has_value(), "schema exposes model properties");
+    check(output_schema.required.has_value(), "schema exposes required properties");
+    if (!output_schema.properties || !output_schema.required) {
+        return;
+    }
+
+    check(std::ranges::find(*output_schema.required, "answer") != output_schema.required->end(),
+          "non-optional property remains required");
+    check(std::ranges::find(*output_schema.required, "confidence") == output_schema.required->end(),
+          "optional property stays optional in the generic schema");
+    const auto& confidence = *output_schema.properties->at("confidence");
+    const auto* confidence_types = std::get_if<std::vector<cail::SchemaType>>(&confidence.type);
+    check(confidence_types != nullptr, "optional property schema uses a type union");
+    if (confidence_types != nullptr) {
+        check(*confidence_types == std::vector<cail::SchemaType>{cail::SchemaType::integer, cail::SchemaType::null},
+              "optional integer schema allows null");
+    }
+
+    auto missing = cail::from_json<Profile>(R"({"answer":"ok"})");
+    check(missing.has_value(), "missing optional properties deserialize");
+    if (missing) {
+        check(!missing->confidence && !missing->address, "missing optional values become empty optionals");
+    }
+
+    auto null_value = cail::from_json<Profile>(R"({"answer":"ok","confidence":null,"address":null})");
+    check(null_value.has_value(), "explicit null values deserialize");
+    if (null_value) {
+        check(!null_value->confidence && !null_value->address, "explicit null values become empty optionals");
+    }
+
+    Profile populated{
+        .answer = "done",
+        .confidence = 7,
+        .address = Address{.city = "London"},
+    };
+    auto json = cail::to_json(populated);
+    check(json && json->find(R"("confidence":7)") != std::string::npos,
+          "populated optional values serialize normally");
+}
+
+void test_openai_strict_optional_schemas()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+
+    const cail::GenerationRequest request{
+        .messages = {cail::Message{
+            .role = cail::MessageRole::user,
+            .content = {cail::TextPart{.text = "make a profile"}},
+        }},
+        .tools = {cail::make_tool<ToolInput>("search", "Search for results")},
+        .structured_output = cail::StructuredOutput{.schema = cail::schema<Profile>()},
+    };
+    const auto response = client.generate(request);
+    check(response.has_value(), "OpenAI accepts optional output and tool schemas");
+    check(stub->request.body.find(R"("required":["address","answer","confidence"])") != std::string::npos,
+          "OpenAI makes optional output properties required");
+    check(stub->request.body.find(R"("confidence":{"type":["integer","null"]})") != std::string::npos,
+          "OpenAI encodes optional output properties as nullable");
+    check(stub->request.body.find(R"("required":["limit","query"])") != std::string::npos,
+          "OpenAI makes optional tool arguments required");
+    check(stub->request.body.find(R"("limit":{"type":["integer","null"]})") != std::string::npos,
+          "OpenAI encodes optional tool arguments as nullable");
+    check(stub->request.body.find(R"("address":{"type":["object","null"],"properties":{"city")") !=
+              std::string::npos,
+          "OpenAI preserves nested schemas on nullable object properties");
+    check(stub->request.body.find(R"("required":["city"])") != std::string::npos,
+          "OpenAI still requires nested object properties");
+}
+
+void test_openai_reasoning_summary()
+{
+    auto transport = std::make_unique<StubTransport>();
+    transport->response.body = R"({"status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"checked the result"}]},{"type":"message","content":[{"type":"output_text","text":"Ready"}]}],"usage":{"input_tokens":20,"output_tokens":8,"input_tokens_details":{"cached_tokens":12},"output_tokens_details":{"reasoning_tokens":3}}})";
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+    const auto response = client.generate("hello");
+    check(response && response->reasoning == "checked the result" && response->text == "Ready",
+          "OpenAI returns reasoning summaries alongside text");
+    check(response && response->usage && response->usage->cache_read_tokens == 12 &&
+              response->usage->reasoning_tokens == 3,
+          "OpenAI preserves reported cache and reasoning usage");
+}
+
+void test_chat_completions()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->response.body = R"({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"content":"Searching","tool_calls":[{"id":"call-1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":10}}})";
+    cail::detail::chat_completions::Client client(
+        "https://example.test/v1/chat/completions", "test-model", "test-key",
+        {{.name = "X-App", .value = "cail"}}, std::move(transport));
+    const auto response = client.generate(cail::GenerationRequest{
+        .messages = {cail::Message{.role = cail::MessageRole::user,
+                                   .content = {cail::TextPart{.text = "Find x"}}}},
+        .tools = {cail::make_tool<ToolInput>("search", "Search")},
+    });
+    check(response && response->text == "Searching" && response->tool_calls.size() == 1 &&
+              response->tool_calls[0].name == "search", "Chat Completions decodes tool calls");
+    check(response && response->usage && response->usage->cache_read_tokens == 10,
+          "Chat Completions decodes usage");
+    check(stub->request.url == "https://example.test/v1/chat/completions" &&
+              stub->request.body.find("\"model\":\"test-model\"") != std::string::npos &&
+              stub->request.body.find("\"tools\"") != std::string::npos,
+          "Chat Completions sends the configured endpoint, model, and tools");
+}
+
+void test_chat_completions_stream()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->chunks = {
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\",\"tool_calls\":[{\"index\":1,\"id\":\"call-1\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"\\\"x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    };
+    cail::detail::chat_completions::Client client(
+        "https://example.test/v1/chat/completions", "test-model", "test-key", {}, std::move(transport));
+    std::vector<cail::StreamEvent> events;
+    const auto response = client.stream(cail::GenerationRequest{
+        .messages = {cail::Message{.role = cail::MessageRole::user,
+                                   .content = {cail::TextPart{.text = "Hi"}}}},
+    }, [&](const cail::StreamEvent& event) { events.push_back(event); });
+    check(response && response->text == "Hi" && response->tool_calls.size() == 1 &&
+              response->tool_calls[0].arguments == R"({"q":"x"})", "Chat Completions assembles streamed calls");
+    check(response && response->usage && response->usage->input_tokens == 4,
+          "Chat Completions receives final streamed usage");
+    check(stub->request.body.find("\"include_usage\":true") != std::string::npos,
+          "Chat Completions requests streamed usage");
+    check(events.size() == 5 && std::get_if<cail::ToolCallArgumentsDelta>(&events[1]) &&
+              std::get<cail::ToolCallArgumentsDelta>(events[1]).output_index == 1 &&
+              std::get_if<cail::ToolCallReady>(&events[4]), "Chat Completions preserves tool indexes in events");
+}
+
+void test_chat_completions_history_and_image()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->response.body = R"({"choices":[{"index":0,"finish_reason":"stop","message":{"content":"Done"}}]})";
+    cail::detail::chat_completions::Client client(
+        "https://example.test/v1/chat/completions", "test-model", "test-key", {}, std::move(transport));
+    const auto response = client.generate(cail::GenerationRequest{
+        .messages = {
+            cail::Message{.role = cail::MessageRole::user,
+                          .content = {cail::TextPart{.text = "Describe"},
+                                      cail::ImagePart{.bytes = std::string{"A\0B", 3}, .mime_type = "image/png"}}},
+            cail::Message{.role = cail::MessageRole::assistant,
+                          .tool_calls = {{.id = "call-1", .name = "search", .arguments = "{}"}}},
+            cail::Message{.role = cail::MessageRole::tool,
+                          .content = {cail::TextPart{.text = "found"}}, .tool_call_id = "call-1"},
+        },
+    });
+    check(response && response->text == "Done", "Chat Completions accepts image and tool history");
+    check(stub->request.body.find("data:image/png;base64,QQBC") != std::string::npos &&
+              stub->request.body.find("\"tool_call_id\":\"call-1\"") != std::string::npos &&
+              stub->request.body.find("\"tool_calls\"") != std::string::npos &&
+              stub->request.body.find("\"index\"") == std::string::npos,
+          "Chat Completions encodes images and matching tool history");
+}
+
+void test_chat_completions_structured_output()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->response.body = R"({"choices":[{"index":0,"finish_reason":"stop","message":{"content":"{\"answer\":\"yes\",\"confidence\":null,\"address\":null}"}}]})";
+    cail::detail::chat_completions::Client client(
+        "https://example.test/v1/chat/completions", "test-model", "test-key", {}, std::move(transport));
+    const auto response = client.generate(cail::GenerationRequest{
+        .messages = {cail::Message{.content = {cail::TextPart{.text = "Classify this."}}}},
+        .structured_output = cail::StructuredOutput{.name = "profile", .schema = cail::schema<Profile>()},
+    });
+    check(response && response->text.find(R"("answer":"yes")") != std::string::npos,
+          "Chat Completions returns structured JSON text");
+    check(stub->request.body.find("\"response_format\":{\"type\":\"json_schema\"") != std::string::npos &&
+              stub->request.body.find("\"name\":\"profile\"") != std::string::npos &&
+              stub->request.body.find("\"strict\":true") != std::string::npos,
+          "Chat Completions sends a strict JSON Schema response format");
+    check(stub->request.body.find("\"confidence\":{\"type\":[\"integer\",\"null\"]") != std::string::npos,
+          "Chat Completions converts optional properties to nullable required properties");
+}
+
+void test_streaming_across_chunk_boundaries()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->response.body.clear();
+    stub->chunks = {
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel",
+        "lo\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n",
+    };
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+
+    std::string text;
+    const auto response = client.stream("say hello", [&](const cail::StreamEvent& event) {
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+            text += delta->text;
+        }
+    });
+    check(response.has_value(), "split SSE stream completes successfully");
+    check(text == "hello", "split SSE text deltas are reassembled");
+    check(response && response->usage && response->usage->input_tokens == 2,
+          "stream response includes final usage");
+    check(stub->request.url == "https://api.openai.com/v1/responses", "stream request uses the responses endpoint");
+}
+
+void test_normalized_stream_events()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    stub->response.body.clear();
+    stub->chunks = {
+        "event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"thinking\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"delta\":\"Hello\"}\n\n",
+        "event: response.function_call_arguments.delta\ndata: {\"output_index\":1,\"delta\":\"{\\\"q\\\":\"}\n\n",
+        "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]},{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+    };
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+
+    std::vector<cail::StreamEvent> events;
+    const auto response = client.stream("Say hello and search", [&](const cail::StreamEvent& event) {
+        events.push_back(event);
+    });
+    check(response && response->text == "Hello" && response->reasoning == "thinking",
+          "streaming returns final text and reasoning");
+    check(response && response->tool_calls.size() == 1 && response->tool_calls.front().id == "call-1",
+          "streaming returns the completed tool call");
+    check(events.size() == 5, "streaming emits each normalized model event");
+    if (events.size() == 5) {
+        const auto* reasoning = std::get_if<cail::ReasoningDelta>(&events[0]);
+        const auto* text = std::get_if<cail::TextDelta>(&events[1]);
+        const auto* arguments = std::get_if<cail::ToolCallArgumentsDelta>(&events[2]);
+        const auto* call = std::get_if<cail::ToolCallReady>(&events[3]);
+        const auto* usage = std::get_if<cail::UsageUpdate>(&events[4]);
+        check(reasoning && reasoning->text == "thinking", "reasoning delta is normalized");
+        check(text && text->text == "Hello", "text delta is normalized");
+        check(arguments && arguments->output_index == 1 && arguments->arguments == R"({"q":)",
+              "tool argument delta keeps its output index");
+        check(call && call->output_index == 1 && call->call.name == "search",
+              "completed tool call keeps its output index");
+        check(usage && usage->usage.input_tokens == 2 && usage->usage.output_tokens == 3,
+              "final usage is normalized");
+    }
+}
+
+void test_stream_cancellation()
+{
+    auto transport = std::make_unique<StubTransport>();
+    transport->chunks = {
+        "event: response.output_text.delta\ndata: {\"delta\":\"first\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"delta\":\"second\"}\n\n",
+    };
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+    std::stop_source cancellation;
+    std::string text;
+    const auto response = client.stream("Say something", [&](const cail::StreamEvent& event) {
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+            text += delta->text;
+            cancellation.request_stop();
+        }
+    }, cancellation.get_token());
+    check(!response && response.error().code == cail::ErrorCode::cancelled,
+          "cancelling during a callback returns a cancellation error");
+    check(text == "first", "cancellation prevents later events");
+}
+
+void test_tool_loop()
+{
+    ScriptedClient client({
+        cail::GenerationResponse{
+            .tool_calls = {cail::ToolCall{.id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}},
+            .continuation_token = "turn-1",
+        },
+        cail::GenerationResponse{.text = "counted"},
+    });
+    auto count_tool = cail::tool<ToolInput, ToolOutput>(
+        "count", "Count characters", [](const ToolInput& input, const cail::ToolContext& context) {
+            check(context.call_id == "call-1" && context.round == 0, "tool receives call context");
+            return ToolOutput{.count = static_cast<int>(input.query.size())};
+        });
+
+    const auto result = cail::run_tool_loop(
+        client,
+        cail::GenerationRequest{.messages = {cail::Message{.content = {cail::TextPart{.text = "count abc"}}}}},
+        std::vector<cail::Tool>{count_tool});
+    check(result && result->text == "counted", "tool loop returns the final model response");
+    check(result && result->tool_results.size() == 1, "tool loop records tool output");
+    check(result && result->tool_results.front().output == R"({"count":3})", "tool output stays typed and serializes");
+    check(client.requests.size() == 2, "tool loop makes a follow-up model call");
+    check(client.requests.size() == 2 && client.requests[1].continuation_token == "turn-1",
+          "tool loop carries continuation state");
+    check(client.requests.size() == 2 && client.requests[1].messages.front().tool_call_id == "call-1",
+          "tool loop sends the result for the matching call");
+}
+
+void test_http_error_mapping()
+{
+    auto transport = std::make_unique<StubTransport>();
+    transport->response = cail::HttpResponse{
+        .status_code = 401,
+        .body = R"({"error":{"message":"bad key","code":"invalid_api_key","type":"authentication_error"}})",
+        .headers = {{.name = "X-Request-Id", .value = "req_123"}},
+    };
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+    const auto response = client.generate("hello");
+    check(!response, "non-success HTTP status returns an error");
+    check(!response && response.error().code == cail::ErrorCode::http_status,
+          "non-success HTTP status maps to the HTTP error code");
+    check(!response && response.error().http_status == 401, "HTTP status is retained on the error");
+    check(!response && response.error().message.find("bad key") != std::string::npos,
+          "provider error message is retained");
+    check(!response && response.error().provider_code == "invalid_api_key" &&
+              response.error().provider_type == "authentication_error" && response.error().request_id == "req_123",
+          "provider error context is retained");
+}
+
+void test_image_content()
+{
+    auto transport = std::make_unique<StubTransport>();
+    auto* stub = transport.get();
+    cail::detail::openai::Client client(
+        {.api_key = "test-key", .model = "test-model"}, std::move(transport));
+
+    const auto response = client.generate(cail::GenerationRequest{
+        .messages = {cail::Message{
+            .role = cail::MessageRole::user,
+            .content = {
+                cail::TextPart{.text = "Inspect this image."},
+                cail::ImagePart{.bytes = std::string{"A\0B", 3}, .mime_type = "image/png"},
+            },
+        }},
+    });
+    check(response.has_value(), "OpenAI accepts user text and image content");
+    const auto text_position = stub->request.body.find("Inspect this image.");
+    const auto image_position = stub->request.body.find("data:image/png;base64,QQBC");
+    check(text_position != std::string::npos && image_position != std::string::npos &&
+              text_position < image_position,
+          "OpenAI preserves content order and encodes original image bytes");
+
+    const auto invalid = client.generate(cail::GenerationRequest{
+        .messages = {cail::Message{
+            .role = cail::MessageRole::assistant,
+            .content = {cail::ImagePart{.bytes = "image", .mime_type = "image/png"}},
+        }},
+    });
+    check(!invalid && invalid.error().code == cail::ErrorCode::invalid_configuration,
+          "OpenAI rejects image content in unsupported roles");
+}
+
+} // namespace test
+
+int main()
+{
+    test::test_field_value_api();
+    test::test_optional_schema_and_json();
+    test::test_openai_strict_optional_schemas();
+    test::test_openai_reasoning_summary();
+    test::test_chat_completions();
+    test::test_chat_completions_stream();
+    test::test_chat_completions_history_and_image();
+    test::test_chat_completions_structured_output();
+    test::test_streaming_across_chunk_boundaries();
+    test::test_normalized_stream_events();
+    test::test_stream_cancellation();
+    test::test_tool_loop();
+    test::test_http_error_mapping();
+    test::test_image_content();
+    return test::failures == 0 ? 0 : 1;
+}

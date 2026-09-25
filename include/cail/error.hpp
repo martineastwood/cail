@@ -12,6 +12,7 @@ enum class ErrorCode {
     invalid_configuration,
     unsupported_schema,
     transport,
+    cancelled,
     http_status,
     provider_response,
     refused,
@@ -28,6 +29,9 @@ struct Error {
     std::string message;
     std::size_t byte_offset{};
     int http_status{};
+    std::string provider_code;
+    std::string provider_type;
+    std::string request_id;
 };
 
 template <typename T>

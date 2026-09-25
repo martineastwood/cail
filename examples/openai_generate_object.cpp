@@ -33,5 +33,6 @@ int main() {
         std::cerr << structured_output.error().message << '\n';
         return 1;
     }
+    std::cout << "Confidence: " << analysis->confidence.value << '\n';
     std::cout << *structured_output << '\n';
 }

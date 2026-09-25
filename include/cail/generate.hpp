@@ -31,13 +31,13 @@ struct GenerateTextOptions {
     if (options.system) {
         options.messages.insert(options.messages.begin(), Message{
             .role = MessageRole::system,
-            .content = std::move(*options.system),
+            .content = {TextPart{.text = std::move(*options.system)}},
         });
     }
     if (options.prompt) {
         options.messages.push_back(Message{
             .role = MessageRole::user,
-            .content = std::move(*options.prompt),
+            .content = {TextPart{.text = std::move(*options.prompt)}},
         });
     }
     GenerationRequest request{

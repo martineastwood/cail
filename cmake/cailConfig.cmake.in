@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(glaze 8.4.0 EXACT CONFIG REQUIRED)
+glaze_setup_asio()
+find_dependency(magic_enum 0.9.8 EXACT CONFIG REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/cailTargets.cmake")
+target_link_libraries(cail::cail INTERFACE glaze::asio)
+check_required_components(cail)

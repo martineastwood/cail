@@ -8,12 +8,10 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace cail {
-
-// The text view is valid only for the duration of the callback.
-using TextDeltaHandler = std::function<void(std::string_view)>;
 
 enum class MessageRole {
     system,
@@ -35,6 +33,17 @@ struct ToolDefinition {
     Schema parameters;
 };
 
+struct TextPart {
+    std::string text;
+};
+
+struct ImagePart {
+    std::string bytes;
+    std::string mime_type;
+};
+
+using ContentPart = std::variant<TextPart, ImagePart>;
+
 template <typename Arguments>
 [[nodiscard]] ToolDefinition make_tool(std::string name, std::string description)
 {
@@ -47,7 +56,7 @@ template <typename Arguments>
 
 struct Message {
     MessageRole role{MessageRole::user};
-    std::string content;
+    std::vector<ContentPart> content;
     std::string tool_call_id;
     std::vector<ToolCall> tool_calls;
 };
@@ -75,6 +84,9 @@ enum class GenerationStatus {
 struct TokenUsage {
     std::size_t input_tokens{};
     std::size_t output_tokens{};
+    std::optional<std::size_t> cache_read_tokens;
+    std::optional<std::size_t> cache_write_tokens;
+    std::optional<std::size_t> reasoning_tokens;
 };
 
 struct ToolResult {
@@ -86,10 +98,40 @@ struct ToolResult {
 struct GenerationResponse {
     GenerationStatus status{GenerationStatus::completed};
     std::string text;
+    std::string reasoning;
     std::optional<TokenUsage> usage;
     std::vector<ToolCall> tool_calls;
     std::vector<ToolResult> tool_results;
     std::optional<std::string> continuation_token;
 };
+
+struct TextDelta {
+    std::string text;
+};
+
+struct RefusalDelta {
+    std::string text;
+};
+
+struct ReasoningDelta {
+    std::string text;
+};
+
+struct ToolCallArgumentsDelta {
+    std::size_t output_index{};
+    std::string arguments;
+};
+
+struct ToolCallReady {
+    std::size_t output_index{};
+    ToolCall call;
+};
+
+struct UsageUpdate {
+    TokenUsage usage;
+};
+
+using StreamEvent = std::variant<TextDelta, RefusalDelta, ReasoningDelta, ToolCallArgumentsDelta, ToolCallReady, UsageUpdate>;
+using StreamHandler = std::function<void(const StreamEvent&)>;
 
 } // namespace cail
