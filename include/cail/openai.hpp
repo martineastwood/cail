@@ -417,8 +417,29 @@ private:
       return {};
     };
 
+    std::vector<ContentPart> pending_tool_images;
+    const auto flush_tool_images = [&]() -> Result<void> {
+      if (pending_tool_images.empty()) {
+        return {};
+      }
+      auto content = wire::input_content(
+          Message{.role = MessageRole::user,
+                  .content = std::move(pending_tool_images)});
+      if (!content) {
+        return std::unexpected(content.error());
+      }
+      pending_tool_images.clear();
+      return append_input(wire::InputMessage{
+          .role = "user", .content = std::move(*content)});
+    };
+
     body.input.reserve(request.messages.size());
     for (const auto &message : request.messages) {
+      if (message.role != MessageRole::tool) {
+        if (auto flushed = flush_tool_images(); !flushed) {
+          return std::unexpected(flushed.error());
+        }
+      }
       if (message.role == MessageRole::tool) {
         if (message.tool_call_id.empty() || !message.tool_calls.empty()) {
           return std::unexpected(Error{
@@ -427,13 +448,26 @@ private:
                          "contain tool calls.",
           });
         }
-        auto output = wire::text_content(message);
-        if (!output) {
-          return std::unexpected(output.error());
+        std::string output;
+        for (const auto &part : message.content) {
+          if (const auto *text = std::get_if<TextPart>(&part)) {
+            output += text->text;
+          } else {
+            const auto &image = std::get<ImagePart>(part);
+            if (image.mime_type.empty() || image.bytes.empty()) {
+              return std::unexpected(Error{
+                  .code = ErrorCode::invalid_configuration,
+                  .message =
+                      "Tool result images require non-empty bytes and a MIME "
+                      "type.",
+              });
+            }
+            pending_tool_images.emplace_back(image);
+          }
         }
         if (auto result = append_input(wire::FunctionCallOutputInput{
                 .call_id = message.tool_call_id,
-                .output = std::move(*output),
+                .output = std::move(output),
             });
             !result) {
           return std::unexpected(result.error());
@@ -488,6 +522,9 @@ private:
           return std::unexpected(result.error());
         }
       }
+    }
+    if (auto flushed = flush_tool_images(); !flushed) {
+      return std::unexpected(flushed.error());
     }
 
     if (!request.tools.empty()) {

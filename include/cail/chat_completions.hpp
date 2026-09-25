@@ -195,7 +195,21 @@ struct ResponseBody {
             },
         };
     }
+    std::vector<glz::raw_json> pending_tool_images;
+    const auto flush_tool_images = [&]() -> Result<void> {
+        if (pending_tool_images.empty()) return {};
+        auto encoded = to_json(pending_tool_images);
+        if (!encoded) return std::unexpected(encoded.error());
+        body.messages.push_back(InputMessage{
+            .role = "user", .content = glz::raw_json{std::move(*encoded)}});
+        pending_tool_images.clear();
+        return {};
+    };
     for (const auto& message : request.messages) {
+        if (message.role != MessageRole::tool) {
+            if (auto flushed = flush_tool_images(); !flushed)
+                return std::unexpected(flushed.error());
+        }
         InputMessage item;
         switch (message.role) {
         case MessageRole::system: item.role = "system"; break;
@@ -205,9 +219,9 @@ struct ResponseBody {
         case MessageRole::tool: item.role = "tool"; break;
         }
         if (message.role == MessageRole::tool) {
-            if (message.tool_call_id.empty()) {
+            if (message.tool_call_id.empty() || !message.tool_calls.empty()) {
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
-                                             .message = "A tool result requires a tool call ID."});
+                                             .message = "A tool result requires a tool call ID and cannot contain tool calls."});
             }
             item.tool_call_id = message.tool_call_id;
         } else if (!message.tool_call_id.empty()) {
@@ -230,11 +244,27 @@ struct ResponseBody {
                                                                              .arguments = call.arguments}});
             }
         }
-        if (message.role == MessageRole::tool && message.content.size() != 1) {
-            return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                         .message = "A tool result requires one text content part."});
-        }
-        if (message.content.size() == 1 && std::holds_alternative<cail::TextPart>(message.content.front())) {
+        if (message.role == MessageRole::tool) {
+            std::string text;
+            for (const auto& part : message.content) {
+                if (const auto* value = std::get_if<cail::TextPart>(&part)) {
+                    text += value->text;
+                } else {
+                    const auto& image = std::get<cail::ImagePart>(part);
+                    if (image.mime_type.empty() || image.bytes.empty()) {
+                        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                                     .message = "Tool result images require bytes and a MIME type."});
+                    }
+                    auto encoded = to_json(ImagePart{.image_url = ImageUrl{
+                        .url = cail::detail::image_data_url(image.mime_type, image.bytes)}});
+                    if (!encoded) return std::unexpected(encoded.error());
+                    pending_tool_images.emplace_back(std::move(*encoded));
+                }
+            }
+            auto encoded = to_json(text);
+            if (!encoded) return std::unexpected(encoded.error());
+            item.content = glz::raw_json{std::move(*encoded)};
+        } else if (message.content.size() == 1 && std::holds_alternative<cail::TextPart>(message.content.front())) {
             auto encoded = to_json(std::get<cail::TextPart>(message.content.front()).text);
             if (!encoded) return std::unexpected(encoded.error());
             item.content = glz::raw_json{std::move(*encoded)};
@@ -265,6 +295,8 @@ struct ResponseBody {
         }
         body.messages.push_back(std::move(item));
     }
+    if (auto flushed = flush_tool_images(); !flushed)
+        return std::unexpected(flushed.error());
     if (!request.tools.empty()) {
         body.tools.emplace();
         for (const auto& tool : request.tools) {

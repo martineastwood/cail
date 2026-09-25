@@ -142,19 +142,32 @@ struct ErrorBody { std::optional<ProviderError> error; };
             continue;
         }
         if (message.role == MessageRole::tool) {
-            if (body.contents.empty() ||
-                message.content.size() != 1 || !std::holds_alternative<cail::TextPart>(message.content.front()))
+            if (body.contents.empty() || !message.tool_calls.empty())
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
-                    .message = "Gemini tool results require a preceding model call and one JSON text part."});
+                    .message = "Gemini tool results require a preceding model call and cannot contain tool calls."});
             const auto* matched = find_tool_call(request, message.tool_call_id);
-            const auto& output = std::get<cail::TextPart>(message.content.front()).text;
-            if (!matched || matched->id.empty() || glz::validate_json(output))
+            std::string output;
+            for (const auto& part : message.content) {
+                if (const auto* text = std::get_if<cail::TextPart>(&part)) output += text->text;
+            }
+            if (!matched || matched->id.empty() || output.empty() || glz::validate_json(output))
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
                     .message = "Gemini tool result requires a known call ID and JSON output."});
-            auto added = append_json(body.contents.emplace_back(Content{.role = "user"}).parts,
+            auto& parts = body.contents.emplace_back(Content{.role = "user"}).parts;
+            auto added = append_json(parts,
                 ResultPart{.functionResponse = FunctionResponse{
                     .name = matched->name, .response = glz::raw_json{output}, .id = matched->id}});
             if (!added) return std::unexpected(added.error());
+            for (const auto& part : message.content) {
+                const auto* image = std::get_if<cail::ImagePart>(&part);
+                if (!image) continue;
+                if (image->mime_type.empty() || image->bytes.empty())
+                    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                        .message = "Gemini tool result images require bytes and a MIME type."});
+                added = append_json(parts, ImagePart{.inlineData = InlineData{
+                    .mimeType = image->mime_type, .data = cail::detail::base64_encode(image->bytes)}});
+                if (!added) return std::unexpected(added.error());
+            }
             continue;
         }
         Content content{.role = message.role == MessageRole::assistant ? "model" : "user"};

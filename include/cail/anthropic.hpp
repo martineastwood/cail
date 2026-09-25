@@ -56,7 +56,7 @@ struct ToolUseBlock {
 struct ToolResultBlock {
     std::string type{"tool_result"};
     std::string tool_use_id;
-    std::string content;
+    glz::raw_json content;
 };
 struct InputMessage {
     std::string role;
@@ -174,14 +174,52 @@ struct StreamBody {
         }
         InputMessage item{.role = message.role == MessageRole::assistant ? "assistant" : "user"};
         if (message.role == MessageRole::tool) {
-            if (message.tool_call_id.empty() || !message.tool_calls.empty() || message.content.size() != 1 ||
-                !std::holds_alternative<cail::TextPart>(message.content.front())) {
+            if (message.tool_call_id.empty() || !message.tool_calls.empty()) {
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
-                                             .message = "Anthropic tool results require a call ID and one text part."});
+                                             .message = "Anthropic tool results require a call ID and cannot contain tool calls."});
+            }
+            std::string text;
+            bool has_image = false;
+            for (const auto& part : message.content) {
+                if (const auto* value = std::get_if<cail::TextPart>(&part)) {
+                    text += value->text;
+                } else {
+                    has_image = true;
+                }
+            }
+            Result<std::string> encoded_content;
+            if (!has_image) {
+                encoded_content = to_json(text);
+            } else {
+                std::vector<glz::raw_json> content;
+                if (!text.empty()) {
+                    if (auto added = append_json(content, TextBlock{.text = text}); !added) {
+                        return std::unexpected(added.error());
+                    }
+                }
+                for (const auto& part : message.content) {
+                    const auto* image = std::get_if<cail::ImagePart>(&part);
+                    if (!image) {
+                        continue;
+                    }
+                    if (image->mime_type.empty() || image->bytes.empty()) {
+                        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                                     .message = "Anthropic tool result images require bytes and a MIME type."});
+                    }
+                    if (auto added = append_json(content, ImageBlock{.source = ImageSource{
+                            .media_type = image->mime_type,
+                            .data = cail::detail::base64_encode(image->bytes)}}); !added) {
+                        return std::unexpected(added.error());
+                    }
+                }
+                encoded_content = to_json(content);
+            }
+            if (!encoded_content) {
+                return std::unexpected(encoded_content.error());
             }
             auto added = append_json(item.content, ToolResultBlock{
                 .tool_use_id = message.tool_call_id,
-                .content = std::get<cail::TextPart>(message.content.front()).text});
+                .content = glz::raw_json{std::move(*encoded_content)}});
             if (!added) return std::unexpected(added.error());
         } else {
             if (!message.tool_call_id.empty() ||
