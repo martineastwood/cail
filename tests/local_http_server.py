@@ -29,6 +29,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop",
                                              "message": {"content": '{"answer":"yes"}'}}]})
+        elif self.path == "/local/chat":
+            if self.headers.get("Authorization"):
+                self.send_error(401)
+                return
+            self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"content": "Hello"}}]})
         elif self.path == "/chat" and body.get("stream"):
             self.send_stream([
                 'data: {"choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n',

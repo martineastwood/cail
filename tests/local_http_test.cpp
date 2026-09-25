@@ -40,6 +40,14 @@ int main(int argc, char** argv)
     const auto chat_result = chat.generate(prompt());
     check(chat_result && chat_result->text == "Hello", "Chat Completions HTTP response");
 
+    const auto local_result = cail::create_local({.endpoint = base + "/local/chat"})("test-model").generate(prompt());
+    check(local_result && local_result->text == "Hello",
+          "Local provider posts to the configured endpoint without an API key");
+    const auto keyed_local = cail::create_local({.endpoint = base + "/local/chat", .api_key = "key"})("test-model")
+                                 .generate(prompt());
+    check(!keyed_local && keyed_local.error().http_status == 401,
+          "Local provider sends a configured API key");
+
     std::string chat_deltas;
     const auto chat_stream = chat.stream(prompt(), [&](const cail::StreamEvent& event) {
         if (const auto* delta = std::get_if<cail::TextDelta>(&event)) chat_deltas += delta->text;

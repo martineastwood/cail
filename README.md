@@ -30,7 +30,7 @@ Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
 
 ## Current implementation
 
-The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Azure Foundry, Anthropic, Gemini, Mistral, Charm Hyper, and Ollama Cloud providers. It targets C++23.
+The SDK provides typed fields, JSON conversion, generation requests, structured outputs, function tool calls, text streaming, and OpenAI, OpenRouter, Azure Foundry, Anthropic, Gemini, Mistral, Charm Hyper, Ollama Cloud, and local model providers. It targets C++23.
 
 `magic_enum` supplies enum names because Glaze's C++23 mode serializes enums as integers by default. Glaze remains the backend for struct reflection and JSON conversion.
 
@@ -188,6 +188,81 @@ Run the prompt example:
 ```sh
 cmake --build build --target cail_ollama_cloud_prompt
 ./build/cail_ollama_cloud_prompt
+```
+
+## Use a local model
+
+You can run a model on your own machine and use it through the same generation and streaming APIs. `cail::local` points at `http://127.0.0.1:8080/v1/chat/completions`, the default endpoint of `llama-server`:
+
+```cpp
+auto answer = cail::generate_text({
+    .model = cail::local("qwen3-1.7b"),
+    .prompt = "Reply with exactly OK.",
+});
+```
+
+The local provider uses CAIL's Chat Completions features, so streaming, tools, and typed structured output work the same way as with the hosted Chat Completions providers. A local server usually needs no API key, so CAIL sends no `Authorization` header unless you set one.
+
+Ask for a typed object when your server implements JSON Schema output:
+
+```cpp
+struct Answer {
+    std::string language;
+};
+
+auto answer = cail::generate_object<Answer>({
+    .model = cail::local("qwen3-1.7b"),
+    .prompt = "What programming language is CAIL, a C++ AI SDK, written in?",
+});
+if (answer) {
+    std::cout << answer->language << '\n';
+}
+```
+
+Tools work the same way when the model supports function calling:
+
+```cpp
+struct WordInput {
+    std::string word;
+};
+
+struct WordOutput {
+    int length{};
+};
+
+auto word_length = cail::tool<WordInput, WordOutput>(
+    "word_length", "Count the letters in a word.",
+    [](const WordInput& input) { return WordOutput{.length = static_cast<int>(input.word.size())}; });
+
+auto result = cail::generate_text({
+    .model = cail::local("qwen3-1.7b"),
+    .prompt = "Use the word_length tool to count the letters in 'native', then answer with the count.",
+    .tools = {word_length},
+});
+```
+
+Pass the endpoint for your runtime with `cail::create_local`. Ollama serves the same API on its own port:
+
+```cpp
+auto model = cail::create_local({.endpoint = "http://127.0.0.1:11434/v1/chat/completions"})(
+    "qwen3-1.7b-local:latest");
+auto answer = cail::generate_text({
+    .model = model,
+    .prompt = "Reply with exactly OK.",
+});
+```
+
+Use `.endpoint` for any OpenAI-compatible server, such as LM Studio, vLLM, or a `llama-server` started on another host or port. Set `.api_key` when your server requires one, and `.headers` for extra request headers. The model string is the model name your server reports, which for llama.cpp is the name in its startup output and for Ollama is the name from `ollama list`.
+
+Local servers vary in what they implement, so check your runtime for streaming, tools, and JSON Schema support. A model without function calling support may answer with text instead of a call, so check `result->tool_results` before decoding one. CAIL reports an error when the server rejects a request.
+
+Run the examples against your local server:
+
+```sh
+cmake --build build --target cail_local_prompt cail_local_object cail_local_tool_call
+./build/cail_local_prompt
+./build/cail_local_object
+./build/cail_local_tool_call
 ```
 
 ## Use Anthropic

@@ -13,6 +13,7 @@ template <typename Tag>
 struct ChatCompletionsPresetSettings {
     std::string api_key;
     std::vector<HttpHeader> headers;
+    std::string endpoint{Tag::endpoint};
 };
 
 namespace detail {
@@ -26,7 +27,7 @@ class ChatCompletionsPresetProvider {
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
         return create_chat_completions({
-            .endpoint = Tag::endpoint,
+            .endpoint = settings_.endpoint,
             .api_key = env_or(settings_.api_key, Tag::env_var),
             .headers = settings_.headers,
         })(std::move(model_id));
