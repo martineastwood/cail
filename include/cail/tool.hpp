@@ -173,6 +173,9 @@ template <typename Client>
             .tools = request.tools,
             .structured_output = request.structured_output,
             .continuation_token = response->continuation_token,
+            .session_id = request.session_id,
+            .max_output_tokens = request.max_output_tokens,
+            .stream_usage = request.stream_usage,
         };
         if (!response->continuation_token) {
             follow_up.messages = request.messages;

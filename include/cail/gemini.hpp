@@ -5,6 +5,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
@@ -27,6 +28,9 @@ struct Config {
     std::string model;
     std::string base_url{"https://generativelanguage.googleapis.com/v1beta"};
     std::vector<HttpHeader> headers;
+    std::string request_session_header;
+    std::string api_key_header{"x-goog-api-key"};
+    std::string api_key_prefix;
 };
 struct TextPart { std::string text; };
 struct InlineData { std::string mimeType; std::string data; };
@@ -42,6 +46,7 @@ struct Tool { std::vector<Declaration> functionDeclarations; };
 struct GenerationConfig {
     std::optional<std::string> responseMimeType;
     std::optional<glz::raw_json> responseJsonSchema;
+    std::optional<std::size_t> maxOutputTokens;
 };
 struct RequestBody {
     std::vector<Content> contents;
@@ -109,10 +114,14 @@ struct ErrorBody { std::optional<ProviderError> error; };
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request)
 {
+    if (auto valid = cail::detail::validate_max_output_tokens(request); !valid)
+        return std::unexpected(valid.error());
     if (request.messages.empty() || request.continuation_token)
         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
             .message = "Gemini requires messages and does not accept continuation tokens."});
     RequestBody body;
+    if (request.max_output_tokens)
+        body.generationConfig = GenerationConfig{.maxOutputTokens = request.max_output_tokens};
     for (const auto& message : request.messages) {
         if (message.role == MessageRole::developer)
             return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -192,8 +201,10 @@ struct ErrorBody { std::optional<ProviderError> error; };
     if (request.structured_output) {
         auto schema = to_json(request.structured_output->schema);
         if (!schema) return std::unexpected(schema.error());
-        body.generationConfig = GenerationConfig{
-            .responseMimeType = "application/json", .responseJsonSchema = glz::raw_json{std::move(*schema)}};
+        auto config = body.generationConfig.value_or(GenerationConfig{});
+        config.responseMimeType = "application/json";
+        config.responseJsonSchema = glz::raw_json{std::move(*schema)};
+        body.generationConfig = std::move(config);
     }
     return body;
 }
@@ -289,10 +300,17 @@ private:
         HttpRequest http{.url = config_.base_url + "/models/" + config_.model +
             (handler ? ":streamGenerateContent?alt=sse" : ":generateContent"),
             .headers = config_.headers, .body = std::move(*json)};
-        http.headers.push_back({.name = "x-goog-api-key", .value = config_.api_key});
+        if (config_.api_key_header.empty())
+            return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                .message = "Gemini requires an API key header name."});
+        http.headers.push_back({.name = config_.api_key_header,
+                                .value = config_.api_key_prefix + config_.api_key});
         http.headers.push_back({.name = "Content-Type", .value = "application/json"});
         http.headers.push_back({.name = "Connection", .value = "close"});
         if (handler) http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
+        cail::detail::append_session_header(http.headers,
+                                            config_.request_session_header,
+                                            request.session_id);
         cail::detail::SseParser parser;
         GenerationResponse result;
         std::optional<Error> stream_error;
@@ -359,10 +377,16 @@ public:
     explicit GeminiProvider(GeminiSettings settings = {}) : settings_(std::move(settings)) {}
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
+        return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    }
+
+    [[nodiscard]] LanguageModel operator()(std::string model_id,
+                                           std::unique_ptr<HttpTransport> transport) const
+    {
         auto key = detail::env_or(settings_.api_key, "GEMINI_API_KEY");
         auto client = std::make_shared<detail::gemini::Client>(detail::gemini::Config{
             .api_key = std::move(key), .model = std::move(model_id),
-            .base_url = settings_.base_url, .headers = settings_.headers});
+            .base_url = settings_.base_url, .headers = settings_.headers}, std::move(transport));
         return LanguageModel{
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {

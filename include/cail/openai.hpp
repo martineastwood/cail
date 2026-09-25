@@ -4,6 +4,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -30,6 +31,7 @@ struct Config {
   std::string api_key;
   std::string model;
   std::string base_url{"https://api.openai.com/v1"};
+  std::string request_session_header;
 };
 
 namespace wire {
@@ -89,6 +91,7 @@ struct RequestBody {
   std::optional<std::string> previous_response_id;
   std::optional<TextOptions> text;
   std::optional<bool> stream;
+  std::optional<std::size_t> max_output_tokens;
 };
 
 struct ResponseContent {
@@ -367,6 +370,9 @@ private:
     if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
     }
+    if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
+      return std::unexpected(valid.error());
+    }
     if (config_.api_key.empty() || config_.model.empty() ||
         config_.base_url.empty() || !transport_) {
       return std::unexpected(Error{
@@ -387,6 +393,7 @@ private:
 
     wire::RequestBody body{
         .model = config_.model,
+        .max_output_tokens = request.max_output_tokens,
     };
     if (streaming) {
       body.stream = true;
@@ -565,6 +572,9 @@ private:
             },
         .body = std::move(*encoded),
     };
+    cail::detail::append_session_header(http_request.headers,
+                                        config_.request_session_header,
+                                        request.session_id);
 
     cail::detail::SseParser sse_parser;
     std::optional<wire::ResponseBody> streamed_response;

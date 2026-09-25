@@ -68,6 +68,19 @@ auto analysis = cail::generate_object<Analysis>({
 });
 ```
 
+Set `max_output_tokens` to cap a generation. The limit also applies to tool follow-up requests:
+
+```cpp
+auto response = cail::generate_text({
+    .model = cail::openai("gpt-6-luna"),
+    .prompt = "Summarize this paragraph in three sentences.",
+    .max_output_tokens = 256,
+});
+```
+
+Chat Completions streaming includes usage by default. Set `stream_usage` to `false` when your
+endpoint does not support `stream_options.include_usage`.
+
 Use `LanguageModel::stream()` to receive events as they arrive. The call returns the complete `GenerationResponse` after the provider finishes:
 
 ```cpp
@@ -132,7 +145,7 @@ auto answer = cail::generate_object<Answer>({
 if (answer) std::cout << answer->language << '\n';
 ```
 
-For another OpenAI-compatible endpoint, use `cail::create_chat_completions({.endpoint = url, .api_key = key})`.
+For another OpenAI-compatible endpoint, use `cail::create_chat_completions({.endpoint = url, .api_key = key})`. Set `.request_session_header` when the endpoint routes requests by a session ID; CAIL sends the value from `GenerationRequest::session_id` in that header.
 
 Run the complete prompt, streaming, and structured output examples with your OpenRouter key:
 
@@ -168,6 +181,35 @@ Run the complete prompt examples:
 cmake --build build --target cail_mistral_prompt cail_hyper_prompt
 ./build/cail_mistral_prompt
 ./build/cail_hyper_prompt
+```
+
+## Use OpenCode
+
+OpenCode models use different request formats. Choose the API family when you select a model, and pass a stable session ID from your application for each conversation:
+
+```cpp
+auto opencode = cail::create_opencode({
+    .service = cail::OpenCodeService::zen,
+});
+
+auto response = cail::generate_text({
+    .model = opencode("gpt-6-luna", cail::OpenCodeApiFamily::responses),
+    .prompt = "Explain one benefit of native C++ applications in one sentence.",
+    .session_id = "conversation-42",
+});
+```
+
+Set `OPENCODE_API_KEY` before running the example, or pass `.api_key` to `create_opencode`. Choose `OpenCodeService::zen` or `OpenCodeService::go` for the service. CAIL supports the `chat_completions`, `responses`, `anthropic_messages`, and `gemini` API families. Availability depends on the service and model you select. CAIL sends the model ID unchanged and does not infer its API family. Check OpenCode's [Zen](https://opencode.ai/docs/zen/) and [Go](https://opencode.ai/docs/go/) endpoint lists to find the format for your model.
+
+OpenCode's SystemOne decision endpoint uses a separate request format and isn't available through this text generation provider.
+
+Every OpenCode request includes the value from `session_id` in `x-opencode-session`. Reuse the same ID for requests in one conversation, and choose the ID in your application. Requests with an empty session ID return an `invalid_configuration` error. `generate_text` and tool follow-up requests preserve the session ID; you can also set it on a `GenerationRequest` directly.
+
+Build and run the example with:
+
+```sh
+cmake --build build --target cail_opencode_prompt
+./build/cail_opencode_prompt
 ```
 
 ## Use Ollama Cloud

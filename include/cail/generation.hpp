@@ -75,7 +75,28 @@ struct GenerationRequest {
     std::optional<StructuredOutput> structured_output;
     // Opaque provider continuation state returned by an earlier response.
     std::optional<std::string> continuation_token;
+    // Stable caller-owned conversation ID for providers that route by session.
+    std::string session_id;
+    // Optional per-request cap on generated tokens.
+    std::optional<std::size_t> max_output_tokens;
+    // Request usage details in streamed responses when the provider supports it.
+    std::optional<bool> stream_usage;
 };
+
+namespace detail {
+
+[[nodiscard]] inline Result<void> validate_max_output_tokens(const GenerationRequest& request)
+{
+    if (request.max_output_tokens && *request.max_output_tokens == 0) {
+        return std::unexpected(Error{
+            .code = ErrorCode::invalid_configuration,
+            .message = "max_output_tokens must be greater than zero.",
+        });
+    }
+    return {};
+}
+
+} // namespace detail
 
 enum class GenerationStatus {
     completed,

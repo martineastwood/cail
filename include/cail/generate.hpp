@@ -3,6 +3,7 @@
 #include <cail/language_model.hpp>
 #include <cail/tool.hpp>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -18,6 +19,9 @@ struct GenerateTextOptions {
     std::vector<Tool> tools;
     std::optional<StructuredOutput> structured_output;
     ToolLoopOptions tool_loop;
+    std::string session_id;
+    std::optional<std::size_t> max_output_tokens;
+    std::optional<bool> stream_usage;
 };
 
 [[nodiscard]] inline Result<GenerationResponse> generate_text(GenerateTextOptions options)
@@ -43,6 +47,9 @@ struct GenerateTextOptions {
     GenerationRequest request{
         .messages = std::move(options.messages),
         .structured_output = std::move(options.structured_output),
+        .session_id = std::move(options.session_id),
+        .max_output_tokens = options.max_output_tokens,
+        .stream_usage = options.stream_usage,
     };
     return run_tool_loop(options.model, std::move(request), options.tools, options.tool_loop);
 }

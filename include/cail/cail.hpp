@@ -17,6 +17,7 @@
 #include <cail/mistral.hpp>
 #include <cail/ollama_cloud.hpp>
 #include <cail/openai.hpp>
+#include <cail/opencode.hpp>
 #include <cail/openrouter.hpp>
 #include <cail/schema.hpp>
 #include <cail/tool.hpp>

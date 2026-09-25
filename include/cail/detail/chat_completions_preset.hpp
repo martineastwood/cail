@@ -3,6 +3,7 @@
 #include <cail/chat_completions.hpp>
 #include <cail/detail/env.hpp>
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +15,7 @@ struct ChatCompletionsPresetSettings {
     std::string api_key;
     std::vector<HttpHeader> headers;
     std::string endpoint{Tag::endpoint};
+    std::string request_session_header;
 };
 
 namespace detail {
@@ -26,11 +28,18 @@ class ChatCompletionsPresetProvider {
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
+        return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    }
+
+    [[nodiscard]] LanguageModel operator()(std::string model_id,
+                                           std::unique_ptr<HttpTransport> transport) const
+    {
         return create_chat_completions({
             .endpoint = settings_.endpoint,
             .api_key = env_or(settings_.api_key, Tag::env_var),
             .headers = settings_.headers,
-        })(std::move(model_id));
+            .request_session_header = settings_.request_session_header,
+        })(std::move(model_id), std::move(transport));
     }
 
     private:

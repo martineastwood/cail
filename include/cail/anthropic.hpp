@@ -5,6 +5,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -30,6 +31,7 @@ struct Config {
     std::string base_url{"https://api.anthropic.com/v1"};
     std::size_t max_tokens{1024};
     std::vector<HttpHeader> headers;
+    std::string request_session_header;
 };
 
 struct TextBlock {
@@ -125,6 +127,9 @@ struct StreamBody {
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, const Config& config, bool streaming)
 {
+    if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
+        return std::unexpected(valid.error());
+    }
     if (request.messages.empty()) {
         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                      .message = "Anthropic requires at least one message."});
@@ -133,7 +138,8 @@ struct StreamBody {
         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                      .message = "Anthropic does not support continuation tokens."});
     }
-    RequestBody body{.model = config.model, .max_tokens = config.max_tokens};
+    RequestBody body{.model = config.model,
+                     .max_tokens = request.max_output_tokens.value_or(config.max_tokens)};
     if (streaming) body.stream = true;
     if (request.structured_output) {
         auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
@@ -296,7 +302,7 @@ class Client {
     {
         if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
-            config_.max_tokens == 0 || !transport_) {
+            (config_.max_tokens == 0 && !request.max_output_tokens) || !transport_) {
             return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                          .message = "Anthropic requires an API key, model, base URL, positive max_tokens, and transport."});
         }
@@ -309,6 +315,9 @@ class Client {
             .headers = config_.headers,
             .body = std::move(*encoded),
         };
+        cail::detail::append_session_header(http.headers,
+                                            config_.request_session_header,
+                                            request.session_id);
         http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
         http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
         http.headers.push_back({.name = "Content-Type", .value = "application/json"});
@@ -431,10 +440,16 @@ class AnthropicProvider {
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
+        return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    }
+
+    [[nodiscard]] LanguageModel operator()(std::string model_id,
+                                           std::unique_ptr<HttpTransport> transport) const
+    {
         auto key = detail::env_or(settings_.api_key, "ANTHROPIC_API_KEY");
         auto client = std::make_shared<detail::anthropic::Client>(detail::anthropic::Config{
             .api_key = std::move(key), .model = std::move(model_id), .base_url = settings_.base_url,
-            .max_tokens = settings_.max_tokens, .headers = settings_.headers});
+            .max_tokens = settings_.max_tokens, .headers = settings_.headers}, std::move(transport));
         return LanguageModel{
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {

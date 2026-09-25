@@ -3,6 +3,7 @@
 #include <cail/detail/base64.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
@@ -77,6 +78,7 @@ struct RequestBody {
         JsonSchema json_schema;
     };
     std::optional<ResponseFormat> response_format;
+    std::optional<std::size_t> max_tokens;
 };
 struct Usage {
     std::size_t prompt_tokens{};
@@ -161,6 +163,9 @@ struct ResponseBody {
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, std::string model, bool streaming)
 {
+    if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
+        return std::unexpected(valid.error());
+    }
     if (request.messages.empty() || model.empty()) {
         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                      .message = "Chat Completions requires a model and at least one message."});
@@ -170,9 +175,12 @@ struct ResponseBody {
                                      .message = "Chat Completions does not support continuation tokens."});
     }
     RequestBody body{.model = std::move(model)};
+    body.max_tokens = request.max_output_tokens;
     if (streaming) {
         body.stream = true;
-        body.stream_options = RequestBody::StreamOptions{};
+        body.stream_options = RequestBody::StreamOptions{
+            .include_usage = request.stream_usage.value_or(true),
+        };
     }
     if (request.structured_output) {
         auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
@@ -276,9 +284,11 @@ struct ResponseBody {
 class Client {
 public:
     Client(std::string endpoint, std::string model, std::string api_key, std::vector<HttpHeader> headers,
-           std::unique_ptr<HttpTransport> transport = std::make_unique<cail::detail::GlazeHttpTransport>())
+           std::unique_ptr<HttpTransport> transport = std::make_unique<cail::detail::GlazeHttpTransport>(),
+           std::string request_session_header = {})
         : endpoint_(std::move(endpoint)), model_(std::move(model)), api_key_(std::move(api_key)),
-          headers_(std::move(headers)), transport_(std::move(transport)) {}
+          headers_(std::move(headers)), transport_(std::move(transport)),
+          request_session_header_(std::move(request_session_header)) {}
 
     [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const
     {
@@ -305,6 +315,7 @@ private:
         http.headers.push_back({.name = "Content-Type", .value = "application/json"});
         if (!api_key_.empty()) http.headers.push_back({.name = "Authorization", .value = "Bearer " + api_key_});
         if (on_event) http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
+        cail::detail::append_session_header(http.headers, request_session_header_, request.session_id);
         cail::detail::SseParser parser;
         GenerationResponse partial;
         std::map<std::size_t, cail::ToolCall> pending_calls;
@@ -412,6 +423,7 @@ private:
     std::string api_key_;
     std::vector<HttpHeader> headers_;
     std::unique_ptr<HttpTransport> transport_;
+    std::string request_session_header_;
 };
 
 } // namespace cail::detail::chat_completions
@@ -422,6 +434,7 @@ struct ChatCompletionsSettings {
     std::string endpoint{"https://api.openai.com/v1/chat/completions"};
     std::string api_key;
     std::vector<HttpHeader> headers;
+    std::string request_session_header;
 };
 
 [[nodiscard]] constexpr AdapterCapabilities chat_completions_adapter_capabilities()
@@ -439,8 +452,15 @@ public:
     explicit ChatCompletionsProvider(ChatCompletionsSettings settings) : settings_(std::move(settings)) {}
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {
+        return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    }
+
+    [[nodiscard]] LanguageModel operator()(std::string model_id,
+                                           std::unique_ptr<HttpTransport> transport) const
+    {
         auto client = std::make_shared<detail::chat_completions::Client>(
-            settings_.endpoint, std::move(model_id), settings_.api_key, settings_.headers);
+            settings_.endpoint, std::move(model_id), settings_.api_key, settings_.headers,
+            std::move(transport), settings_.request_session_header);
         return LanguageModel{
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {

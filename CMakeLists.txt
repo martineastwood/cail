@@ -112,6 +112,9 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_openrouter_object examples/openrouter_object.cpp)
     target_link_libraries(cail_openrouter_object PRIVATE cail::cail)
 
+    add_executable(cail_opencode_prompt examples/opencode_prompt.cpp)
+    target_link_libraries(cail_opencode_prompt PRIVATE cail::cail)
+
     add_executable(cail_anthropic_prompt examples/anthropic_prompt.cpp)
     target_link_libraries(cail_anthropic_prompt PRIVATE cail::cail)
 
