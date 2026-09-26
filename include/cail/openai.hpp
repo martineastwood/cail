@@ -37,6 +37,9 @@ struct Config {
   bool prompt_cache_key = false;
 };
 
+struct MessageOptions {
+  std::vector<glz::raw_json> reasoning_details;
+};
 
 class Client {
 public:
@@ -123,10 +126,6 @@ private:
       }
       body.input.emplace_back(std::move(*encoded_item));
       return {};
-    };
-
-    struct MessageOptions {
-      std::vector<glz::raw_json> reasoning_details;
     };
 
     std::vector<ContentPart> pending_tool_images;
