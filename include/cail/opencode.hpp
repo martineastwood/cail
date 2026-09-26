@@ -30,6 +30,7 @@ enum class OpenCodeApiFamily {
 struct OpenCodeSettings {
     std::string api_key;
     OpenCodeService service{OpenCodeService::zen};
+    std::string base_url;
 };
 
 namespace detail::opencode {
@@ -105,7 +106,8 @@ public:
                                            std::unique_ptr<HttpTransport> transport) const
     {
         const auto key = detail::env_or(settings_.api_key, "OPENCODE_API_KEY");
-        const auto root = detail::opencode::base_url(settings_.service);
+        const auto root = settings_.base_url.empty() ? detail::opencode::base_url(settings_.service)
+                                                     : settings_.base_url;
         const std::string session_header{detail::opencode::session_header};
         switch (api_family) {
         case OpenCodeApiFamily::chat_completions: {

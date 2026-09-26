@@ -80,6 +80,11 @@ int main(int argc, char** argv)
               bad_result.error().http_status == 429 && bad_result.error().provider_code == "rate_limited" &&
               bad_result.error().request_id == "req_local",
           "Chat Completions HTTP error context");
+    const auto bad_stream = bad_chat.stream(prompt(), [](const cail::StreamEvent&) {});
+    check(!bad_stream && bad_stream.error().http_status == 429 &&
+              bad_stream.error().message == "slow down" &&
+              bad_stream.error().provider_code == "rate_limited",
+          "Chat Completions streaming HTTP error body");
 
     cail::detail::openai::Client responses({.api_key = "test-key", .model = "test-model", .base_url = base});
     const auto response_result = responses.generate(prompt());

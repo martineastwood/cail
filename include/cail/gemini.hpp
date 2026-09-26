@@ -14,6 +14,7 @@
 #include <glaze/glaze.hpp>
 
 #include <memory>
+#include <map>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -150,9 +151,15 @@ struct ErrorBody { std::optional<ProviderError> error; };
             for (const auto& part : message.content) {
                 if (const auto* text = std::get_if<cail::TextPart>(&part)) output += text->text;
             }
-            if (!matched || matched->id.empty() || output.empty() || glz::validate_json(output))
+            if (!matched || matched->id.empty())
                 return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
-                    .message = "Gemini tool result requires a known call ID and JSON output."});
+                    .message = "Gemini tool result requires a known call ID."});
+            glz::generic value;
+            if (glz::read_json(value, output) || !value.is_object()) {
+                auto wrapped = to_json(std::map<std::string, std::string>{{"output", output}});
+                if (!wrapped) return std::unexpected(wrapped.error());
+                output = std::move(*wrapped);
+            }
             auto& parts = body.contents.emplace_back(Content{.role = "user"}).parts;
             auto added = append_json(parts,
                 ResultPart{.functionResponse = FunctionResponse{
@@ -310,6 +317,47 @@ private:
         if (!body) return std::unexpected(body.error());
         auto json = to_json(*body);
         if (!json) return std::unexpected(json.error());
+        if (request.provider_options) {
+            glz::generic options;
+            if (const auto error = glz::read_json(options, *request.provider_options); error)
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = glz::format_error(error, *request.provider_options)});
+            if (options.is_object() && options.contains("reasoning_effort") &&
+                options["reasoning_effort"].is_string()) {
+                auto effort = options["reasoning_effort"].get<std::string>();
+                options.get<glz::generic::object_t>().erase("reasoning_effort");
+                if (!options.contains("generationConfig"))
+                    options["generationConfig"] = glz::generic::object_t{};
+                auto& config = options["generationConfig"];
+                config["thinkingConfig"] = glz::generic::object_t{};
+                if (config_.model.starts_with("gemini-2.5")) {
+                    const int budget = effort == "none" ? 0 : effort == "low" || effort == "minimal" ? 1024
+                        : effort == "medium" ? 8192 : effort == "high" ? 24576 : -1;
+                    config["thinkingConfig"]["thinkingBudget"] = budget;
+                } else {
+                    for (auto& c : effort) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+                    config["thinkingConfig"]["thinkingLevel"] = effort;
+                }
+            }
+            if (body->generationConfig && options.is_object() && options.contains("generationConfig")) {
+                auto base = to_json(*body->generationConfig);
+                auto override_config = options["generationConfig"].dump();
+                if (!base) return std::unexpected(base.error());
+                if (!override_config) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = "Could not encode Gemini generation configuration."});
+                auto merged_config = merge_json_objects(*base, *override_config);
+                if (!merged_config) return std::unexpected(merged_config.error());
+                if (const auto error = glz::read_json(options["generationConfig"], *merged_config); error)
+                    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                        .message = glz::format_error(error, *merged_config)});
+            }
+            auto encoded_options = options.dump();
+            if (!encoded_options) return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                .message = "Could not encode Gemini provider options."});
+            auto merged = merge_json_objects(*json, *encoded_options);
+            if (!merged) return std::unexpected(merged.error());
+            json = std::move(*merged);
+        }
         HttpRequest http{.url = config_.base_url + "/models/" + config_.model +
             (handler ? ":streamGenerateContent?alt=sse" : ":generateContent"),
             .headers = config_.headers, .body = std::move(*json)};
@@ -324,6 +372,17 @@ private:
         cail::detail::append_session_header(http.headers,
                                             config_.request_session_header,
                                             request.session_id);
+        if (request.before_request) {
+            try {
+                request.before_request(http);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = std::string{"The before-request callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = "The before-request callback failed."});
+            }
+        }
         cail::detail::SseParser parser;
         GenerationResponse result;
         std::optional<Error> stream_error;
@@ -344,6 +403,18 @@ private:
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
+        if (request.after_response) {
+            try {
+                request.after_response(*response);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = std::string{"The after-response callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = "The after-response callback failed."});
+            }
+        }
+
         if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         const auto context = [&](Error error) {
             return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);

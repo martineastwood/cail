@@ -12,6 +12,7 @@
 
 #include <glaze/glaze.hpp>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -60,8 +61,8 @@ struct InputMessage {
 };
 struct RequestBody {
     std::string model;
-    std::vector<InputMessage> messages;
-    std::optional<std::vector<ToolDefinition>> tools;
+    std::vector<glz::raw_json> messages;
+    std::optional<std::vector<glz::raw_json>> tools;
     std::optional<bool> stream;
     struct StreamOptions {
         bool include_usage{true};
@@ -98,11 +99,21 @@ struct ProviderError {
 struct ErrorBody {
     std::optional<ProviderError> error;
 };
+struct OutputToolCall {
+    std::optional<std::size_t> index;
+    std::optional<std::string> id;
+    struct Function {
+        std::optional<std::string> name;
+        std::optional<std::string> arguments;
+    };
+    std::optional<Function> function;
+};
 struct OutputMessage {
-    std::optional<std::string> content;
+    std::optional<glz::raw_json> content;
     std::optional<std::string> refusal;
     std::optional<std::string> reasoning_content;
-    std::optional<std::vector<ToolCall>> tool_calls;
+    std::optional<glz::raw_json> reasoning_details;
+    std::optional<std::vector<OutputToolCall>> tool_calls;
 };
 struct Choice {
     std::size_t index{};
@@ -115,6 +126,49 @@ struct ResponseBody {
     std::optional<Usage> usage;
     std::optional<ProviderError> error;
 };
+
+inline void append_reasoning_text(const glz::generic& value, std::string& text)
+{
+    if (const auto* string = value.get_if<std::string>()) {
+        text += *string;
+    } else if (const auto* array = value.get_if<glz::generic::array_t>()) {
+        for (const auto& item : *array) append_reasoning_text(item, text);
+    } else if (value.is_object()) {
+        for (const auto* key : {"text", "content", "reasoning", "reasoning_content"}) {
+            if (value.contains(key)) append_reasoning_text(value[key], text);
+        }
+    }
+}
+
+struct ContentText { std::string text; std::string reasoning; };
+
+inline void append_content(const glz::generic& value, ContentText& output, bool thinking = false)
+{
+    if (const auto* string = value.get_if<std::string>()) {
+        (thinking ? output.reasoning : output.text) += *string;
+    } else if (const auto* array = value.get_if<glz::generic::array_t>()) {
+        for (const auto& item : *array) append_content(item, output, thinking);
+    } else if (value.is_object()) {
+        if (value.contains("type")) {
+            if (const auto* type = value["type"].get_if<std::string>())
+                thinking |= *type == "thinking" || *type == "reasoning";
+        }
+        for (const auto* key : {"thinking", "text", "content"}) {
+            if (value.contains(key)) append_content(value[key], output, thinking || std::string_view(key) == "thinking");
+        }
+    }
+}
+
+[[nodiscard]] inline Result<ContentText> decode_content(const glz::raw_json& raw)
+{
+    glz::generic value;
+    if (const auto error = glz::read_json(value, raw.str); error)
+        return std::unexpected(Error{.code = ErrorCode::provider_response,
+                                     .message = glz::format_error(error, raw.str)});
+    ContentText output;
+    append_content(value, output);
+    return output;
+}
 
 [[nodiscard]] inline TokenUsage usage(const Usage& value)
 {
@@ -135,8 +189,17 @@ struct ResponseBody {
     const auto& choice = body.choices.front();
     const auto& message = *choice.message;
     GenerationResponse result;
-    result.text = message.refusal.value_or(message.content.value_or(""));
-    result.reasoning = message.reasoning_content.value_or("");
+    if (message.content) {
+        auto content = decode_content(*message.content);
+        if (!content) return std::unexpected(content.error());
+        result.text = std::move(content->text);
+        result.reasoning = std::move(content->reasoning);
+    }
+    if (message.refusal) result.text = *message.refusal;
+    result.reasoning += message.reasoning_content.value_or("");
+    if (message.reasoning_details) {
+        result.provider_options = "{\"reasoning_details\":" + message.reasoning_details->str + "}";
+    }
     if (message.refusal) {
         result.status = GenerationStatus::refused;
     } else if (choice.finish_reason == "length") {
@@ -147,12 +210,13 @@ struct ResponseBody {
     }
     if (message.tool_calls) {
         for (const auto& call : *message.tool_calls) {
-            if (call.id.empty() || call.function.name.empty()) {
+            if (!call.id || call.id->empty() || !call.function ||
+                !call.function->name || call.function->name->empty()) {
                 return std::unexpected(Error{.code = ErrorCode::provider_response,
                                              .message = "Chat Completions returned an incomplete tool call."});
             }
-            result.tool_calls.push_back(cail::ToolCall{.id = call.id, .name = call.function.name,
-                                                       .arguments = call.function.arguments});
+            result.tool_calls.push_back(cail::ToolCall{.id = *call.id, .name = *call.function->name,
+                                                       .arguments = call.function->arguments.value_or("")});
         }
     }
     if (body.usage) {
@@ -178,9 +242,9 @@ struct ResponseBody {
     body.max_tokens = request.max_output_tokens;
     if (streaming) {
         body.stream = true;
-        body.stream_options = RequestBody::StreamOptions{
-            .include_usage = request.stream_usage.value_or(true),
-        };
+        if (request.stream_usage.value_or(true)) {
+            body.stream_options = RequestBody::StreamOptions{};
+        }
     }
     if (request.structured_output) {
         auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
@@ -195,13 +259,27 @@ struct ResponseBody {
             },
         };
     }
+    const auto append_message = [&body](InputMessage item,
+                                         const std::optional<std::string>& provider_options) -> Result<void> {
+        auto encoded = to_json(item);
+        if (!encoded) return std::unexpected(encoded.error());
+        if (provider_options) {
+            auto merged = merge_json_objects(*encoded, *provider_options);
+            if (!merged) return std::unexpected(merged.error());
+            encoded = std::move(*merged);
+        }
+        body.messages.emplace_back(std::move(*encoded));
+        return {};
+    };
     std::vector<glz::raw_json> pending_tool_images;
     const auto flush_tool_images = [&]() -> Result<void> {
         if (pending_tool_images.empty()) return {};
         auto encoded = to_json(pending_tool_images);
         if (!encoded) return std::unexpected(encoded.error());
-        body.messages.push_back(InputMessage{
+        auto user_message = to_json(InputMessage{
             .role = "user", .content = glz::raw_json{std::move(*encoded)}});
+        if (!user_message) return std::unexpected(user_message.error());
+        body.messages.emplace_back(std::move(*user_message));
         pending_tool_images.clear();
         return {};
     };
@@ -258,26 +336,39 @@ struct ResponseBody {
                     auto encoded = to_json(ImagePart{.image_url = ImageUrl{
                         .url = cail::detail::image_data_url(image.mime_type, image.bytes)}});
                     if (!encoded) return std::unexpected(encoded.error());
+                    auto provider_part_options = image.provider_options;
+                    if (provider_part_options) {
+                        auto merged = merge_json_objects(*encoded, *provider_part_options);
+                        if (!merged) return std::unexpected(merged.error());
+                        encoded = std::move(*merged);
+                    }
                     pending_tool_images.emplace_back(std::move(*encoded));
                 }
             }
             auto encoded = to_json(text);
             if (!encoded) return std::unexpected(encoded.error());
             item.content = glz::raw_json{std::move(*encoded)};
-        } else if (message.content.size() == 1 && std::holds_alternative<cail::TextPart>(message.content.front())) {
+        } else if (message.content.size() == 1 && std::holds_alternative<cail::TextPart>(message.content.front()) &&
+                   !std::get<cail::TextPart>(message.content.front()).provider_options) {
             auto encoded = to_json(std::get<cail::TextPart>(message.content.front()).text);
             if (!encoded) return std::unexpected(encoded.error());
             item.content = glz::raw_json{std::move(*encoded)};
         } else if (!message.content.empty()) {
-            if (message.role != MessageRole::user) {
+            const bool has_image = std::any_of(message.content.begin(), message.content.end(), [](const auto& part) {
+                return std::holds_alternative<cail::ImagePart>(part);
+            });
+            if (message.role != MessageRole::user && has_image) {
                 return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                             .message = "Image and multipart content is supported only in user messages."});
+                                             .message = "Images are supported only in user and tool-result messages."});
             }
             std::vector<glz::raw_json> parts;
             for (const auto& part : message.content) {
                 Result<std::string> encoded = std::unexpected(Error{});
                 if (const auto* text = std::get_if<cail::TextPart>(&part)) {
                     encoded = to_json(TextPart{.text = text->text});
+                    if (encoded && text->provider_options) {
+                        encoded = merge_json_objects(*encoded, *text->provider_options);
+                    }
                 } else if (const auto* image = std::get_if<cail::ImagePart>(&part)) {
                     if (image->mime_type.empty()) {
                         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -285,6 +376,9 @@ struct ResponseBody {
                     }
                     encoded = to_json(ImagePart{.image_url = ImageUrl{
                         .url = cail::detail::image_data_url(image->mime_type, image->bytes)}});
+                    if (encoded && image->provider_options) {
+                        encoded = merge_json_objects(*encoded, *image->provider_options);
+                    }
                 }
                 if (!encoded) return std::unexpected(encoded.error());
                 parts.emplace_back(std::move(*encoded));
@@ -293,7 +387,8 @@ struct ResponseBody {
             if (!encoded) return std::unexpected(encoded.error());
             item.content = glz::raw_json{std::move(*encoded)};
         }
-        body.messages.push_back(std::move(item));
+        if (auto added = append_message(std::move(item), message.provider_options); !added)
+            return std::unexpected(added.error());
     }
     if (auto flushed = flush_tool_images(); !flushed)
         return std::unexpected(flushed.error());
@@ -306,8 +401,15 @@ struct ResponseBody {
             }
             auto parameters = to_json(tool.parameters);
             if (!parameters) return std::unexpected(parameters.error());
-            body.tools->push_back(ToolDefinition{.function = ToolDefinition::Function{
+            auto encoded = to_json(ToolDefinition{.function = ToolDefinition::Function{
                 .name = tool.name, .description = tool.description, .parameters = glz::raw_json{std::move(*parameters)}}});
+            if (!encoded) return std::unexpected(encoded.error());
+            if (tool.provider_options) {
+                auto merged = merge_json_objects(*encoded, *tool.provider_options);
+                if (!merged) return std::unexpected(merged.error());
+                encoded = std::move(*merged);
+            }
+            body.tools->emplace_back(std::move(*encoded));
         }
     }
     return body;
@@ -343,14 +445,31 @@ private:
         if (!body) return std::unexpected(body.error());
         auto encoded = to_json(*body);
         if (!encoded) return std::unexpected(encoded.error());
+        if (request.provider_options) {
+            auto merged = merge_json_objects(*encoded, *request.provider_options);
+            if (!merged) return std::unexpected(merged.error());
+            encoded = std::move(*merged);
+        }
         HttpRequest http{.url = endpoint_, .headers = headers_, .body = std::move(*encoded)};
         http.headers.push_back({.name = "Content-Type", .value = "application/json"});
         if (!api_key_.empty()) http.headers.push_back({.name = "Authorization", .value = "Bearer " + api_key_});
         if (on_event) http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
         cail::detail::append_session_header(http.headers, request_session_header_, request.session_id);
+        if (request.before_request) {
+            try {
+                request.before_request(http);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = std::string{"The before-request callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = "The before-request callback failed."});
+            }
+        }
         cail::detail::SseParser parser;
         GenerationResponse partial;
         std::map<std::size_t, cail::ToolCall> pending_calls;
+        std::vector<glz::raw_json> reasoning_details;
         bool finished = false;
         bool done = false;
         std::optional<Error> stream_error;
@@ -378,8 +497,16 @@ private:
                 if (choice.delta) {
                     const auto& delta = *choice.delta;
                     if (delta.content) {
-                        partial.text += *delta.content;
-                        on_event(StreamEvent{TextDelta{.text = *delta.content}});
+                        auto content = decode_content(*delta.content);
+                        if (!content) { stream_error = content.error(); return; }
+                        if (!content->reasoning.empty()) {
+                            partial.reasoning += content->reasoning;
+                            on_event(StreamEvent{ReasoningDelta{.text = content->reasoning}});
+                        }
+                        if (!content->text.empty()) {
+                            partial.text += content->text;
+                            on_event(StreamEvent{TextDelta{.text = content->text}});
+                        }
                     }
                     if (delta.refusal) {
                         partial.status = GenerationStatus::refused;
@@ -390,16 +517,47 @@ private:
                         partial.reasoning += *delta.reasoning_content;
                         on_event(StreamEvent{ReasoningDelta{.text = *delta.reasoning_content}});
                     }
+                    if (delta.reasoning_details) {
+                        auto decoded = from_json<std::vector<glz::raw_json>>(delta.reasoning_details->str);
+                        if (!decoded) {
+                            stream_error = decoded.error();
+                            return;
+                        }
+                        reasoning_details.insert(reasoning_details.end(), decoded->begin(), decoded->end());
+                        std::string reasoning_text;
+                        for (const auto& detail : *decoded) {
+                            glz::generic value;
+                            if (const auto error = glz::read_json(value, detail.str); error) {
+                                stream_error = Error{.code = ErrorCode::provider_response,
+                                    .message = glz::format_error(error, detail.str)};
+                                return;
+                            }
+                            append_reasoning_text(value, reasoning_text);
+                        }
+                        if (!reasoning_text.empty()) {
+                            on_event(StreamEvent{ReasoningDelta{.text = reasoning_text}});
+                        }
+                        auto details_json = to_json(reasoning_details);
+                        if (!details_json) {
+                            stream_error = details_json.error();
+                            return;
+                        }
+                        partial.provider_options = "{\"reasoning_details\":" + *details_json + "}";
+                    }
                     if (delta.tool_calls) {
                         for (std::size_t index = 0; index < delta.tool_calls->size(); ++index) {
                             const auto& call = (*delta.tool_calls)[index];
                             const auto call_index = call.index.value_or(index);
                             auto& pending = pending_calls[call_index];
-                            if (!call.id.empty()) pending.id = call.id;
-                            if (!call.function.name.empty()) pending.name = call.function.name;
-                            pending.arguments += call.function.arguments;
-                            if (!call.function.arguments.empty()) on_event(StreamEvent{ToolCallArgumentsDelta{
-                                .output_index = call_index, .arguments = call.function.arguments}});
+                            if (call.id && !call.id->empty()) pending.id = *call.id;
+                            if (!call.function) continue;
+                            if (call.function->name && !call.function->name->empty())
+                                pending.name = *call.function->name;
+                            if (call.function->arguments && !call.function->arguments->empty()) {
+                                pending.arguments += *call.function->arguments;
+                                on_event(StreamEvent{ToolCallArgumentsDelta{
+                                    .output_index = call_index, .arguments = *call.function->arguments}});
+                            }
                         }
                     }
                 }
@@ -417,6 +575,17 @@ private:
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
+        if (request.after_response) {
+            try {
+                request.after_response(*response);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = std::string{"The after-response callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = "The after-response callback failed."});
+            }
+        }
         if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         const auto context = [&](Error error) {
             return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);

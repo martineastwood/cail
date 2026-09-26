@@ -4,6 +4,7 @@
 #include <cail/tool.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -22,6 +23,9 @@ struct GenerateTextOptions {
     std::string session_id;
     std::optional<std::size_t> max_output_tokens;
     std::optional<bool> stream_usage;
+    std::optional<std::string> provider_options;
+    std::function<void(HttpRequest&)> before_request;
+    std::function<void(const HttpResponse&)> after_response;
 };
 
 [[nodiscard]] inline Result<GenerationResponse> generate_text(GenerateTextOptions options)
@@ -50,6 +54,9 @@ struct GenerateTextOptions {
         .session_id = std::move(options.session_id),
         .max_output_tokens = options.max_output_tokens,
         .stream_usage = options.stream_usage,
+        .provider_options = std::move(options.provider_options),
+        .before_request = std::move(options.before_request),
+        .after_response = std::move(options.after_response),
     };
     return run_tool_loop(options.model, std::move(request), options.tools, options.tool_loop);
 }

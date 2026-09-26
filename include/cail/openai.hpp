@@ -11,11 +11,13 @@
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
 #include <cail/openai_embeddings.hpp>
+#include <cail/detail/openai_responses_wire.hpp>
 #include <cail/tool.hpp>
 
 #include <glaze/glaze.hpp>
 
 #include <algorithm>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,301 +36,6 @@ struct Config {
   std::string request_session_header;
 };
 
-namespace wire {
-
-struct InputMessage {
-  std::string role;
-  glz::raw_json content;
-};
-
-struct InputTextPart {
-  std::string type{"input_text"};
-  std::string text;
-};
-
-struct InputImagePart {
-  std::string type{"input_image"};
-  std::string image_url;
-};
-
-struct FunctionCallInput {
-  std::string type{"function_call"};
-  std::string call_id;
-  std::string name;
-  std::string arguments;
-};
-
-struct FunctionCallOutputInput {
-  std::string type{"function_call_output"};
-  std::string call_id;
-  std::string output;
-};
-
-struct FunctionTool {
-  std::string type{"function"};
-  std::string name;
-  std::string description;
-  glz::raw_json parameters;
-  bool strict{true};
-};
-
-struct JsonSchemaFormat {
-  std::string type{"json_schema"};
-  std::string name;
-  std::optional<std::string> description;
-  bool strict{true};
-  glz::raw_json schema;
-};
-
-struct TextOptions {
-  JsonSchemaFormat format;
-};
-
-struct RequestBody {
-  std::string model;
-  std::vector<glz::raw_json> input;
-  std::optional<std::vector<FunctionTool>> tools;
-  std::optional<std::string> previous_response_id;
-  std::optional<TextOptions> text;
-  std::optional<bool> stream;
-  std::optional<std::size_t> max_output_tokens;
-};
-
-struct ResponseContent {
-  std::string type;
-  std::optional<std::string> text;
-  std::optional<std::string> refusal;
-};
-
-struct ResponseItem {
-  std::string type;
-  std::vector<ResponseContent> content;
-  std::vector<ResponseContent> summary;
-  std::optional<std::string> call_id;
-  std::optional<std::string> name;
-  std::optional<std::string> arguments;
-};
-
-struct ResponseUsage {
-  std::size_t input_tokens{};
-  std::size_t output_tokens{};
-  struct InputDetails {
-    std::optional<std::size_t> cached_tokens;
-  };
-  struct OutputDetails {
-    std::optional<std::size_t> reasoning_tokens;
-  };
-  std::optional<InputDetails> input_tokens_details;
-  std::optional<OutputDetails> output_tokens_details;
-};
-
-struct ProviderError {
-  std::string message;
-  std::optional<std::string> code;
-  std::optional<std::string> type;
-};
-
-struct ResponseBody {
-  std::optional<std::string> id;
-  std::string status;
-  std::vector<ResponseItem> output;
-  std::optional<ResponseUsage> usage;
-  std::optional<ProviderError> error;
-};
-
-struct ErrorBody {
-  std::optional<ProviderError> error;
-};
-
-struct StreamEventBody {
-  std::string type;
-  std::optional<std::string> delta;
-  std::optional<std::size_t> output_index;
-  std::optional<std::string> message;
-  std::optional<ResponseBody> response;
-  std::optional<ProviderError> error;
-};
-
-[[nodiscard]] inline Result<GenerationResponse>
-decode_response(ResponseBody response_body, int http_status) {
-  if (response_body.status == "failed") {
-    return std::unexpected(Error{
-        .code = ErrorCode::provider_response,
-        .message = response_body.error ? response_body.error->message
-                                       : "OpenAI reported a failed response.",
-        .http_status = http_status,
-        .provider_code = response_body.error && response_body.error->code
-                             ? *response_body.error->code
-                             : "",
-        .provider_type = response_body.error && response_body.error->type
-                             ? *response_body.error->type
-                             : "",
-    });
-  }
-
-  GenerationResponse result;
-  result.continuation_token = response_body.id;
-  if (response_body.status == "incomplete") {
-    result.status = GenerationStatus::incomplete;
-  } else if (response_body.status != "completed") {
-    return std::unexpected(Error{
-        .code = ErrorCode::provider_response,
-        .message = "OpenAI returned an unsupported response status: " +
-                   response_body.status,
-        .http_status = http_status,
-    });
-  }
-
-  for (const auto &item : response_body.output) {
-    if (item.type == "reasoning") {
-      for (const auto &part : item.summary) {
-        if (part.text) {
-          result.reasoning += *part.text;
-        }
-      }
-      continue;
-    }
-    if (item.type == "function_call") {
-      if (!item.call_id || item.call_id->empty() || !item.name ||
-          item.name->empty() || !item.arguments) {
-        return std::unexpected(Error{
-            .code = ErrorCode::provider_response,
-            .message = "OpenAI returned a function call without its call ID, "
-                       "name, or arguments.",
-            .http_status = http_status,
-        });
-      }
-      result.tool_calls.push_back(ToolCall{
-          .id = *item.call_id,
-          .name = *item.name,
-          .arguments = *item.arguments,
-      });
-      continue;
-    }
-    if (item.type != "message") {
-      continue;
-    }
-    for (const auto &content : item.content) {
-      if (content.type == "refusal") {
-        result.status = GenerationStatus::refused;
-        if (content.refusal) {
-          result.text += *content.refusal;
-        }
-      } else if (content.type == "output_text" && content.text) {
-        result.text += *content.text;
-      }
-    }
-  }
-  if (response_body.usage) {
-    result.usage = TokenUsage{
-        .input_tokens = response_body.usage->input_tokens,
-        .output_tokens = response_body.usage->output_tokens,
-        .cache_read_tokens =
-            response_body.usage->input_tokens_details
-                ? response_body.usage->input_tokens_details->cached_tokens
-                : std::nullopt,
-        .reasoning_tokens =
-            response_body.usage->output_tokens_details
-                ? response_body.usage->output_tokens_details->reasoning_tokens
-                : std::nullopt,
-    };
-  }
-  return result;
-}
-
-[[nodiscard]] inline std::string_view role_name(MessageRole role) {
-  switch (role) {
-  case MessageRole::system:
-    return "system";
-  case MessageRole::developer:
-    return "developer";
-  case MessageRole::user:
-    return "user";
-  case MessageRole::assistant:
-    return "assistant";
-  case MessageRole::tool:
-    return {};
-  }
-  return {};
-}
-
-[[nodiscard]] inline Result<std::string> text_content(const Message &message) {
-  std::string text;
-  for (const auto &part : message.content) {
-    if (const auto *value = std::get_if<TextPart>(&part)) {
-      text += value->text;
-    } else {
-      return std::unexpected(Error{
-          .code = ErrorCode::invalid_configuration,
-          .message =
-              "OpenAI Responses supports image parts only in user messages.",
-      });
-    }
-  }
-  return text;
-}
-
-[[nodiscard]] inline Result<glz::raw_json>
-input_content(const Message &message) {
-  const auto has_image =
-      std::ranges::any_of(message.content, [](const ContentPart &part) {
-        return std::holds_alternative<ImagePart>(part);
-      });
-  if (!has_image) {
-    auto value = text_content(message);
-    if (!value) {
-      return std::unexpected(value.error());
-    }
-    auto encoded = to_json(*value);
-    if (!encoded) {
-      return std::unexpected(encoded.error());
-    }
-    return glz::raw_json{std::move(*encoded)};
-  }
-  if (message.role != MessageRole::user) {
-    return std::unexpected(Error{
-        .code = ErrorCode::invalid_configuration,
-        .message =
-            "OpenAI Responses supports image parts only in user messages.",
-    });
-  }
-
-  std::vector<glz::raw_json> parts;
-  parts.reserve(message.content.size());
-  for (const auto &part : message.content) {
-    Result<std::string> encoded;
-    if (const auto *value = std::get_if<TextPart>(&part)) {
-      if (value->text.empty()) {
-        continue;
-      }
-      encoded = to_json(InputTextPart{.text = value->text});
-    } else {
-      const auto &image = std::get<ImagePart>(part);
-      if (image.mime_type.empty() || image.bytes.empty()) {
-        return std::unexpected(Error{
-            .code = ErrorCode::invalid_configuration,
-            .message =
-                "An image part requires non-empty bytes and a MIME type.",
-        });
-      }
-      encoded = to_json(InputImagePart{
-          .image_url =
-              cail::detail::image_data_url(image.mime_type, image.bytes),
-      });
-    }
-    if (!encoded) {
-      return std::unexpected(encoded.error());
-    }
-    parts.emplace_back(std::move(*encoded));
-  }
-  auto encoded = to_json(parts);
-  if (!encoded) {
-    return std::unexpected(encoded.error());
-  }
-  return glz::raw_json{std::move(*encoded)};
-}
-
-} // namespace wire
 
 class Client {
 public:
@@ -417,6 +124,10 @@ private:
       return {};
     };
 
+    struct MessageOptions {
+      std::vector<glz::raw_json> reasoning_details;
+    };
+
     std::vector<ContentPart> pending_tool_images;
     const auto flush_tool_images = [&]() -> Result<void> {
       if (pending_tool_images.empty()) {
@@ -489,6 +200,30 @@ private:
             .code = ErrorCode::invalid_tool_call,
             .message = "Only assistant messages can contain tool calls.",
         });
+      }
+
+      if (message.role == MessageRole::assistant && message.provider_options) {
+        MessageOptions options;
+        if (const auto error =
+                glz::read<glz::opts{.error_on_unknown_keys = false}>(
+                    options, *message.provider_options);
+            error) {
+          return std::unexpected(Error{
+              .code = ErrorCode::invalid_configuration,
+              .message = "Assistant provider options must be a JSON object: " +
+                         glz::format_error(error, *message.provider_options),
+              .byte_offset = error.count,
+          });
+        }
+        for (const auto &raw_item : options.reasoning_details) {
+          auto item = wire::decode_response_item(raw_item, 0);
+          if (!item) {
+            return std::unexpected(item.error());
+          }
+          if (item->type == "reasoning" && item->encrypted_content) {
+            body.input.emplace_back(raw_item);
+          }
+        }
       }
 
       if (message.tool_calls.empty() || !message.content.empty()) {
@@ -587,6 +322,30 @@ private:
     if (!encoded) {
       return std::unexpected(encoded.error());
     }
+    if (request.provider_options) {
+      auto options = *request.provider_options;
+      glz::generic parsed;
+      if (!glz::read_json(parsed, options) && parsed.is_object()) {
+        auto& object = parsed.get<glz::generic::object_t>();
+        if (const auto it = object.find("reasoning_effort");
+            it != object.end() && it->second.is_string()) {
+          const auto effort = it->second.get<std::string>();
+          object.erase(it);
+          if (!parsed.contains("reasoning") || !parsed["reasoning"].is_object()) {
+            parsed["reasoning"] = glz::generic::object_t{};
+          }
+          parsed["reasoning"]["effort"] = effort;
+          if (auto dumped = parsed.dump()) {
+            options = std::move(*dumped);
+          }
+        }
+      }
+      auto merged = merge_json_objects(*encoded, options);
+      if (!merged) {
+        return std::unexpected(merged.error());
+      }
+      encoded = std::move(*merged);
+    }
 
     std::string endpoint = config_.base_url;
     while (!endpoint.empty() && endpoint.back() == '/') {
@@ -612,6 +371,20 @@ private:
     cail::detail::append_session_header(http_request.headers,
                                         config_.request_session_header,
                                         request.session_id);
+    if (request.before_request) {
+      try {
+        request.before_request(http_request);
+      } catch (const std::exception& error) {
+        return std::unexpected(Error{
+            .code = ErrorCode::invalid_configuration,
+            .message = std::string{"The before-request callback failed: "} +
+                       error.what()});
+      } catch (...) {
+        return std::unexpected(Error{
+            .code = ErrorCode::invalid_configuration,
+            .message = "The before-request callback failed."});
+      }
+    }
 
     cail::detail::SseParser sse_parser;
     std::optional<wire::ResponseBody> streamed_response;
@@ -688,6 +461,20 @@ private:
     if (!http_response) {
       return std::unexpected(http_response.error());
     }
+    if (request.after_response) {
+      try {
+        request.after_response(*http_response);
+      } catch (const std::exception& error) {
+        return std::unexpected(Error{
+            .code = ErrorCode::provider_response,
+            .message = std::string{"The after-response callback failed: "} +
+                       error.what()});
+      } catch (...) {
+        return std::unexpected(Error{
+            .code = ErrorCode::provider_response,
+            .message = "The after-response callback failed."});
+      }
+    }
     const auto with_context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error),
                                                               *http_response);
@@ -735,7 +522,12 @@ private:
       std::vector<std::size_t> call_indexes;
       for (std::size_t index = 0; index < streamed_response->output.size();
            ++index) {
-        if (streamed_response->output[index].type == "function_call") {
+        auto item = wire::decode_response_item(streamed_response->output[index],
+                                               http_response->status_code);
+        if (!item) {
+          return with_context(item.error());
+        }
+        if (item->type == "function_call") {
           call_indexes.push_back(index);
         }
       }
@@ -909,7 +701,7 @@ using OpenAIProviderSettings = OpenAiResponsesPresetSettings<OpenAITag>;
 class OpenAIProvider {
     public:
     explicit OpenAIProvider(OpenAIProviderSettings settings = {})
-        : preset_(settings), settings_(std::move(settings)) {}
+        : settings_(settings), preset_(std::move(settings)) {}
 
     [[nodiscard]] LanguageModel operator()(std::string model_id) const
     {

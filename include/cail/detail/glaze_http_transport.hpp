@@ -77,6 +77,10 @@ class GlazeHttpTransport final : public HttpTransport {
             .body = request.body,
             .headers = std::move(headers),
             .on_data = [state, on_data, stop](std::string_view bytes) {
+                if (state->response.status_code >= 400) {
+                    state->response.body.append(bytes);
+                    return;
+                }
                 if (!stop.stop_requested() && !state->callback_error && on_data) {
                     try {
                         on_data(bytes);
@@ -101,6 +105,7 @@ class GlazeHttpTransport final : public HttpTransport {
                 }
             },
             .on_disconnect = [state] { std::call_once(state->finish, [state] { state->disconnected.set_value(); }); },
+            .status_is_error = [](int) { return false; },
         };
 
         auto connection = client_.stream_request_v2(params);

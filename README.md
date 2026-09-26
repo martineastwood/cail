@@ -52,6 +52,8 @@ struct Analysis {
 
 `cail::Field<T>::value` is the runtime value; read it directly and assign through the field. JSON conversion emits only the value, while schema inspection reads the metadata. For example, `analysis.confidence.value` reads a value and `analysis.confidence = 0.8` updates it.
 
+When defining a schema directly, set `Schema::min_items` and `Schema::max_items` to limit array lengths. `Schema::items` describes each array value.
+
 The example round-trips an `Analysis` value and emits its generated JSON Schema with `cail::json_schema<Analysis>()`.
 
 The default OpenAI provider reads `OPENAI_API_KEY` from the environment. Pass the model into the provider-neutral generation helpers:
@@ -94,6 +96,33 @@ auto response = cail::openai("gpt-6-luna").stream("Summarize this paragraph.", [
 The callback can also receive `RefusalDelta`, `ReasoningDelta`, `ToolCallArgumentsDelta`, `ToolCallReady`, and `UsageUpdate`. Tool argument deltas and completed calls include an output index so you can match them. The callback runs synchronously while `stream()` processes the response. The returned result reports success or failure and includes the final text, reasoning, tool calls, and usage.
 
 When the provider reports them, `response->usage->cache_read_tokens` and `reasoning_tokens` contain extra token counts. These fields are optional, so an absent value means the provider did not report that detail. Errors include a stable `code`; OpenAI errors can also include `http_status`, `provider_code`, `provider_type`, and `request_id`.
+
+You can pass provider-specific JSON fields on a request or in message history when a provider needs data beyond the common API. CAIL returns opaque response metadata in `GenerationResponse::provider_options`, so you can save it with the assistant message and send it back on a follow-up request:
+
+```cpp
+auto model = cail::openrouter("openai/gpt-4o-mini");
+cail::GenerationRequest request{
+    .messages = {cail::Message{
+        .role = cail::MessageRole::user,
+        .content = {cail::TextPart{.text = "What is CAIL?"}},
+    }},
+};
+auto response = model.generate(request);
+if (response) {
+    request.messages.push_back(cail::Message{
+        .role = cail::MessageRole::assistant,
+        .content = {cail::TextPart{.text = response->text}},
+        .provider_options = response->provider_options,
+    });
+    request.messages.push_back(cail::Message{
+        .role = cail::MessageRole::user,
+        .content = {cail::TextPart{.text = "Tell me one more thing."}},
+    });
+    auto follow_up = model.generate(request);
+}
+```
+
+For Chat Completions providers, request options are added to the request body. Message, content-part, and tool-definition options are added to their matching history entries. Use only fields accepted by the provider you selected.
 
 To cancel an active stream, pass a stop token and request a stop from another thread or from the callback:
 
@@ -448,7 +477,7 @@ int main()
 }
 ```
 
-Pass the original file bytes and the matching MIME type. The OpenAI Responses adapter sends images in user messages; image parts in other roles return an error.
+Pass the original file bytes and the matching MIME type. Image parts are supported in user and tool-result messages; assistant messages cannot contain images. If you build tool-result history yourself, add an `ImagePart` to the tool message content and CAIL will encode it for the selected provider.
 
 `std::optional<T>` fields are optional in CAIL schemas and deserialize from either a missing property or `null`. OpenAI strict output and tool schemas require every property, so CAIL marks optional properties required and allows `null` in their JSON Schema type; the model returns `null` when no value is available.
 

@@ -299,6 +299,31 @@ void test_chat_completions_stream() {
         "Chat Completions preserves tool indexes in events");
 }
 
+void test_chat_completions_mistral_content() {
+  auto transport = std::make_unique<StubTransport>();
+  transport->chunks = {
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"First step\"}]}]}}]}\n\n",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\" next\"}]},{\"type\":\"text\",\"text\":\"Answer\"}]}}]}\n\n",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" done\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+  };
+  cail::detail::chat_completions::Client client(
+      "https://example.test/v1/chat/completions", "test-model", "test-key", {},
+      std::move(transport));
+  std::vector<cail::StreamEvent> events;
+  const auto response = client.stream(
+      cail::GenerationRequest{.messages = {cail::Message{
+          .role = cail::MessageRole::user,
+          .content = {cail::TextPart{.text = "Hi"}}}}},
+      [&](const cail::StreamEvent &event) { events.push_back(event); });
+  check(response && response->reasoning == "First step next" &&
+            response->text == "Answer done",
+        "Chat Completions decodes Mistral thinking and text parts");
+  check(events.size() >= 3 && std::get_if<cail::ReasoningDelta>(&events[0]) &&
+            std::get_if<cail::TextDelta>(&events[2]),
+        "Chat Completions emits Mistral reasoning before answer text");
+}
+
 void test_chat_completions_history_and_image() {
   auto transport = std::make_unique<StubTransport>();
   auto *stub = transport.get();
@@ -880,6 +905,7 @@ int main() {
   test::test_openai_reasoning_summary();
   test::test_chat_completions();
   test::test_chat_completions_stream();
+  test::test_chat_completions_mistral_content();
   test::test_chat_completions_history_and_image();
   test::test_chat_completions_structured_output();
   test::test_streaming_across_chunk_boundaries();

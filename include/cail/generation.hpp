@@ -13,6 +13,9 @@
 
 namespace cail {
 
+struct HttpRequest;
+struct HttpResponse;
+
 enum class MessageRole {
     system,
     developer,
@@ -33,15 +36,21 @@ struct ToolDefinition {
     std::string name;
     std::string description;
     Schema parameters;
+    // JSON object with provider-specific fields for the tool definition.
+    std::optional<std::string> provider_options;
 };
 
 struct TextPart {
     std::string text;
+    // JSON object with provider-specific fields for this content part.
+    std::optional<std::string> provider_options;
 };
 
 struct ImagePart {
     std::string bytes;
     std::string mime_type;
+    // JSON object with provider-specific fields for this content part.
+    std::optional<std::string> provider_options;
 };
 
 using ContentPart = std::variant<TextPart, ImagePart>;
@@ -61,6 +70,8 @@ struct Message {
     std::vector<ContentPart> content;
     std::string tool_call_id;
     std::vector<ToolCall> tool_calls;
+    // JSON object with provider-specific fields for this message.
+    std::optional<std::string> provider_options;
 };
 
 struct StructuredOutput {
@@ -81,6 +92,12 @@ struct GenerationRequest {
     std::optional<std::size_t> max_output_tokens;
     // Request usage details in streamed responses when the provider supports it.
     std::optional<bool> stream_usage;
+    // JSON object with provider-specific fields for the generation request.
+    std::optional<std::string> provider_options;
+    // Runs after the provider request is encoded and before it is sent.
+    std::function<void(HttpRequest&)> before_request;
+    // Runs after the provider response is received.
+    std::function<void(const HttpResponse&)> after_response;
 };
 
 namespace detail {
@@ -126,6 +143,8 @@ struct GenerationResponse {
     std::vector<ToolCall> tool_calls;
     std::vector<ToolResult> tool_results;
     std::optional<std::string> continuation_token;
+    // JSON object with provider-specific response fields for history round-trips.
+    std::optional<std::string> provider_options;
 };
 
 struct TextDelta {

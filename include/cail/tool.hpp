@@ -176,6 +176,9 @@ template <typename Client>
             .session_id = request.session_id,
             .max_output_tokens = request.max_output_tokens,
             .stream_usage = request.stream_usage,
+            .provider_options = request.provider_options,
+            .before_request = request.before_request,
+            .after_response = request.after_response,
         };
         if (!response->continuation_token) {
             follow_up.messages = request.messages;

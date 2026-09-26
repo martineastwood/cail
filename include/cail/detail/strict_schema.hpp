@@ -43,16 +43,20 @@ inline void make_nullable(Schema& schema) {
 
     Schema result = schema;
     if (has_schema_type(schema, SchemaType::object)) {
-        if (!schema.properties || !schema.required || !schema.additional_properties || *schema.additional_properties) {
+        if (schema.additional_properties.value_or(false)) {
             return std::unexpected(Error{
                 .code = ErrorCode::unsupported_schema,
-                .message = "Strict JSON Schema output requires object properties, a required list, and "
-                           "additionalProperties=false.",
+                .message = "Strict JSON Schema output does not allow additional properties.",
             });
         }
 
-        for (const auto& name : *schema.required) {
-            if (!schema.properties->contains(name)) {
+        const std::map<std::string, std::shared_ptr<Schema>> empty_properties;
+        const std::vector<std::string> empty_required;
+        const auto& schema_properties =
+            schema.properties ? *schema.properties : empty_properties;
+        const auto& schema_required = schema.required ? *schema.required : empty_required;
+        for (const auto& name : schema_required) {
+            if (!schema_properties.contains(name)) {
                 return std::unexpected(Error{
                     .code = ErrorCode::unsupported_schema,
                     .message = "The structured output schema requires an unknown property: " + name,
@@ -62,8 +66,8 @@ inline void make_nullable(Schema& schema) {
 
         std::map<std::string, std::shared_ptr<Schema>> properties;
         std::vector<std::string> required;
-        required.reserve(schema.properties->size());
-        for (const auto& [name, child] : *schema.properties) {
+        required.reserve(schema_properties.size());
+        for (const auto& [name, child] : schema_properties) {
             if (!child) {
                 return std::unexpected(Error{
                     .code = ErrorCode::unsupported_schema,
@@ -74,7 +78,7 @@ inline void make_nullable(Schema& schema) {
             if (!strict_child) {
                 return std::unexpected(strict_child.error());
             }
-            if (std::ranges::find(*schema.required, name) == schema.required->end()) {
+            if (std::ranges::find(schema_required, name) == schema_required.end()) {
                 make_nullable(*strict_child);
             }
             properties.emplace(name, std::make_shared<Schema>(std::move(*strict_child)));
@@ -82,6 +86,7 @@ inline void make_nullable(Schema& schema) {
         }
         result.properties = std::move(properties);
         result.required = std::move(required);
+        result.additional_properties = false;
     }
 
     if (has_schema_type(schema, SchemaType::array)) {

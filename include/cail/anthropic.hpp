@@ -92,6 +92,8 @@ struct OutputBlock {
     std::string type;
     std::optional<std::string> text;
     std::optional<std::string> thinking;
+    std::optional<std::string> signature;
+    std::optional<std::string> data;
     std::optional<std::string> id;
     std::optional<std::string> name;
     glz::raw_json input;
@@ -112,6 +114,7 @@ struct StreamDelta {
     std::string type;
     std::optional<std::string> text;
     std::optional<std::string> thinking;
+    std::optional<std::string> signature;
     std::optional<std::string> partial_json;
     std::optional<std::string> stop_reason;
 };
@@ -230,6 +233,7 @@ struct StreamBody {
             for (const auto& part : message.content) {
                 Result<void> added;
                 if (const auto* text = std::get_if<cail::TextPart>(&part)) {
+                    if (text->text.empty()) continue;
                     added = append_json(item.content, TextBlock{.text = text->text});
                 } else {
                     const auto& image = std::get<cail::ImagePart>(part);
@@ -294,12 +298,33 @@ inline void apply_usage(TokenUsage& target, const Usage& usage)
     return {};
 }
 
+struct ThinkingBlock {
+    std::string type;
+    std::optional<std::string> thinking;
+    std::optional<std::string> signature;
+    std::optional<std::string> data;
+};
+
+[[nodiscard]] inline Result<void> retain_thinking(GenerationResponse& result,
+                                                 const std::vector<ThinkingBlock>& blocks)
+{
+    if (blocks.empty()) return {};
+    auto encoded = to_json(blocks);
+    if (!encoded) return std::unexpected(encoded.error());
+    result.provider_options = "{\"reasoning_details\":" + *encoded + "}";
+    return {};
+}
+
 [[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body)
 {
     GenerationResponse result;
     auto status = apply_stop_reason(result, body.stop_reason);
     if (!status) return std::unexpected(status.error());
+    std::vector<ThinkingBlock> thinking;
     for (const auto& block : body.content) {
+        if (block.type == "thinking" || block.type == "redacted_thinking")
+            thinking.push_back({.type = block.type, .thinking = block.thinking,
+                                .signature = block.signature, .data = block.data});
         if (block.type == "text" && block.text) result.text += *block.text;
         else if (block.type == "thinking" && block.thinking) result.reasoning += *block.thinking;
         else if (block.type == "tool_use") {
@@ -311,11 +336,92 @@ inline void apply_usage(TokenUsage& target, const Usage& usage)
                 .id = *block.id, .name = *block.name, .arguments = block.input.str});
         }
     }
+    if (auto retained = retain_thinking(result, thinking); !retained)
+        return std::unexpected(retained.error());
     if (body.usage) {
         result.usage.emplace();
         apply_usage(*result.usage, *body.usage);
     }
     return result;
+}
+
+[[nodiscard]] inline Result<std::string> apply_message_options(
+    std::string_view encoded, const GenerationRequest& request)
+{
+    glz::generic body;
+    if (const auto error = glz::read_json(body, encoded); error)
+        return std::unexpected(Error{.code = ErrorCode::json_deserialization,
+            .message = glz::format_error(error, encoded)});
+    const auto cache = [](glz::generic& target, const std::optional<std::string>& options) -> Result<void> {
+        if (!options) return {};
+        glz::generic fields;
+        if (const auto error = glz::read_json(fields, *options); error)
+            return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                .message = glz::format_error(error, *options)});
+        if (fields.is_object() && fields.contains("cache_control"))
+            target["cache_control"] = fields["cache_control"];
+        return {};
+    };
+    glz::generic::array_t system;
+    std::size_t index = 0;
+    for (const auto& message : request.messages) {
+        if (message.role == MessageRole::system) {
+            for (const auto& part : message.content) {
+                const auto& text = std::get<cail::TextPart>(part);
+                if (text.text.empty()) continue;
+                glz::generic block = glz::generic::object_t{};
+                block["type"] = "text";
+                block["text"] = text.text;
+                if (auto result = cache(block, text.provider_options); !result)
+                    return std::unexpected(result.error());
+                system.push_back(std::move(block));
+            }
+            continue;
+        }
+        auto& parts = body["messages"].get<glz::generic::array_t>()[index++]["content"].get<glz::generic::array_t>();
+        if (message.role == MessageRole::tool) {
+            if (auto result = cache(parts.front(), message.provider_options); !result)
+                return std::unexpected(result.error());
+        } else {
+            std::size_t part_index = 0;
+            for (const auto& part : message.content) {
+                if (const auto* text = std::get_if<cail::TextPart>(&part); text && text->text.empty()) continue;
+                auto result = std::visit([&](const auto& value) { return cache(parts[part_index], value.provider_options); },
+                                         part);
+                if (!result) return std::unexpected(result.error());
+                ++part_index;
+            }
+            if (message.role == MessageRole::assistant && message.provider_options) {
+                glz::generic options;
+                if (const auto error = glz::read_json(options, *message.provider_options); error)
+                    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                        .message = glz::format_error(error, *message.provider_options)});
+                if (options.is_object() && options.contains("reasoning_details")) {
+                    if (const auto* details = options["reasoning_details"].get_if<glz::generic::array_t>()) {
+                        glz::generic::array_t thinking;
+                        for (const auto& block : *details) {
+                            if (!block.is_object() || !block.contains("type")) continue;
+                            const auto* type = block["type"].get_if<std::string>();
+                            if (type && (*type == "thinking" || *type == "redacted_thinking")) thinking.push_back(block);
+                        }
+                        parts.insert(parts.begin(), thinking.begin(), thinking.end());
+                    }
+                }
+            }
+        }
+    }
+    if (!system.empty()) body["system"] = std::move(system);
+    if (!request.tools.empty()) {
+        auto& tools = body["tools"].get<glz::generic::array_t>();
+        for (std::size_t i = 0; i < tools.size(); ++i) {
+            if (auto result = cache(tools[i], request.tools[i].provider_options); !result)
+                return std::unexpected(result.error());
+        }
+    }
+    auto result = body.dump();
+    if (!result) return std::unexpected(Error{.code = ErrorCode::json_serialization,
+        .message = "Could not encode Anthropic message options."});
+    return std::move(*result);
 }
 
 class Client {
@@ -348,6 +454,13 @@ class Client {
         if (!body) return std::unexpected(body.error());
         auto encoded = to_json(*body);
         if (!encoded) return std::unexpected(encoded.error());
+        encoded = apply_message_options(*encoded, request);
+        if (!encoded) return std::unexpected(encoded.error());
+        if (request.provider_options) {
+            auto merged = merge_json_objects(*encoded, *request.provider_options);
+            if (!merged) return std::unexpected(merged.error());
+            encoded = std::move(*merged);
+        }
         HttpRequest http{
             .url = config_.base_url + "/messages",
             .headers = config_.headers,
@@ -356,13 +469,26 @@ class Client {
         cail::detail::append_session_header(http.headers,
                                             config_.request_session_header,
                                             request.session_id);
+        http.headers.push_back({.name = "x-api-key", .value = config_.api_key});
         http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
         http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
         http.headers.push_back({.name = "Content-Type", .value = "application/json"});
         if (on_event) http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
+        if (request.before_request) {
+            try {
+                request.before_request(http);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = std::string{"The before-request callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                    .message = "The before-request callback failed."});
+            }
+        }
         cail::detail::SseParser parser;
         GenerationResponse partial;
         std::map<std::size_t, cail::ToolCall> pending_calls;
+        std::map<std::size_t, ThinkingBlock> thinking_blocks;
         bool finished = false;
         std::optional<Error> stream_error;
         const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
@@ -387,14 +513,31 @@ class Client {
                 call.id = chunk.content_block->id.value_or("");
                 call.name = chunk.content_block->name.value_or("");
                 call.arguments = chunk.content_block->input.str == "{}" ? "" : chunk.content_block->input.str;
+            } else if (chunk.type == "content_block_start" && chunk.index && chunk.content_block &&
+                       (chunk.content_block->type == "thinking" || chunk.content_block->type == "redacted_thinking")) {
+                const auto& block = *chunk.content_block;
+                thinking_blocks[*chunk.index] = {.type = block.type, .thinking = block.thinking,
+                                                .signature = block.signature, .data = block.data};
+                if (block.thinking && !block.thinking->empty()) {
+                    partial.reasoning += *block.thinking;
+                    on_event(StreamEvent{ReasoningDelta{.text = *block.thinking}});
+                }
             } else if (chunk.type == "content_block_delta" && chunk.index && chunk.delta) {
                 const auto& delta = *chunk.delta;
                 if (delta.type == "text_delta" && delta.text) {
                     partial.text += *delta.text;
                     on_event(StreamEvent{TextDelta{.text = *delta.text}});
                 } else if (delta.type == "thinking_delta" && delta.thinking) {
+                    auto& block = thinking_blocks[*chunk.index];
+                    block.type = "thinking";
+                    if (!block.thinking) block.thinking.emplace();
+                    *block.thinking += *delta.thinking;
                     partial.reasoning += *delta.thinking;
                     on_event(StreamEvent{ReasoningDelta{.text = *delta.thinking}});
+                } else if (delta.type == "signature_delta" && delta.signature) {
+                    auto& signature = thinking_blocks[*chunk.index].signature;
+                    if (!signature) signature.emplace();
+                    *signature += *delta.signature;
                 } else if (delta.type == "input_json_delta" && delta.partial_json) {
                     pending_calls[*chunk.index].arguments += *delta.partial_json;
                     on_event(StreamEvent{ToolCallArgumentsDelta{
@@ -431,6 +574,18 @@ class Client {
             parser.feed(bytes, handle_event);
         }, stop) : transport_->send(http);
         if (!response) return std::unexpected(response.error());
+        if (request.after_response) {
+            try {
+                request.after_response(*response);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = std::string{"The after-response callback failed: "} + error.what()});
+            } catch (...) {
+                return std::unexpected(Error{.code = ErrorCode::provider_response,
+                    .message = "The after-response callback failed."});
+            }
+        }
+
         if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         const auto context = [&](Error error) {
             return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
@@ -454,6 +609,10 @@ class Client {
         if (stream_error) return context(*stream_error);
         if (!finished || !pending_calls.empty()) return context(Error{.code = ErrorCode::provider_response,
             .message = "Anthropic closed the stream before message_stop or a completed tool call."});
+        std::vector<ThinkingBlock> thinking;
+        for (const auto& [index, block] : thinking_blocks) thinking.push_back(block);
+        if (auto retained = retain_thinking(partial, thinking); !retained)
+            return context(retained.error());
         return partial;
     }
 

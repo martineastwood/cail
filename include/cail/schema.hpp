@@ -41,6 +41,8 @@ struct Schema {
     std::optional<std::vector<std::string>> required;
     std::shared_ptr<Schema> items;
     std::optional<bool> additional_properties;
+    std::optional<std::size_t> min_items;
+    std::optional<std::size_t> max_items;
 };
 
 namespace detail {
@@ -215,6 +217,183 @@ template <typename T>
     return to_json(schema<T>());
 }
 
+namespace detail {
+
+[[nodiscard]] inline Result<SchemaType> schema_type_from_name(std::string_view name)
+{
+    if (name == "object") return SchemaType::object;
+    if (name == "array") return SchemaType::array;
+    if (name == "string") return SchemaType::string;
+    if (name == "integer") return SchemaType::integer;
+    if (name == "number") return SchemaType::number;
+    if (name == "boolean") return SchemaType::boolean;
+    if (name == "null") return SchemaType::null;
+    return std::unexpected(Error{
+        .code = ErrorCode::json_deserialization,
+        .message = "Unsupported JSON Schema type: " + std::string{name},
+    });
+}
+
+[[nodiscard]] inline Result<std::size_t> schema_size_from_generic(
+    const glz::generic& value, std::string_view key)
+{
+    if (value.is_number()) {
+        const auto number = value.as<double>();
+        if (number < 0 || number != static_cast<double>(static_cast<std::size_t>(number))) {
+            return std::unexpected(Error{
+                .code = ErrorCode::json_deserialization,
+                .message = "JSON Schema " + std::string{key} + " must be a non-negative integer",
+            });
+        }
+        return static_cast<std::size_t>(number);
+    }
+    return std::unexpected(Error{
+        .code = ErrorCode::json_deserialization,
+        .message = "JSON Schema " + std::string{key} + " must be a non-negative integer",
+    });
+}
+
+[[nodiscard]] inline Result<Schema> schema_from_generic(const glz::generic& source)
+{
+    if (!source.is_object() || !source.contains("type")) {
+        return std::unexpected(Error{
+            .code = ErrorCode::json_deserialization,
+            .message = "JSON Schema values must be objects with a type",
+        });
+    }
+
+    Schema result;
+    const auto& type = source["type"];
+    if (type.is_string()) {
+        auto parsed = schema_type_from_name(type.get<std::string>());
+        if (!parsed) return std::unexpected(parsed.error());
+        result.type = *parsed;
+    } else if (const auto* types = type.get_if<glz::generic::array_t>()) {
+        std::vector<SchemaType> parsed_types;
+        parsed_types.reserve(types->size());
+        for (const auto& entry : *types) {
+            if (!entry.is_string()) {
+                return std::unexpected(Error{
+                    .code = ErrorCode::json_deserialization,
+                    .message = "JSON Schema types must be strings",
+                });
+            }
+            auto parsed = schema_type_from_name(entry.get<std::string>());
+            if (!parsed) return std::unexpected(parsed.error());
+            parsed_types.push_back(*parsed);
+        }
+        result.type = std::move(parsed_types);
+    } else {
+        return std::unexpected(Error{
+            .code = ErrorCode::json_deserialization,
+            .message = "JSON Schema types must be strings",
+        });
+    }
+
+    if (source.contains("description") && source["description"].is_string()) {
+        result.description = source["description"].get<std::string>();
+    }
+    if (source.contains("minimum") && source["minimum"].is_number()) {
+        result.minimum = source["minimum"].as<double>();
+    }
+    if (source.contains("maximum") && source["maximum"].is_number()) {
+        result.maximum = source["maximum"].as<double>();
+    }
+    if (source.contains("enum")) {
+        const auto* values = source["enum"].get_if<glz::generic::array_t>();
+        if (!values) {
+            return std::unexpected(Error{
+                .code = ErrorCode::json_deserialization,
+                .message = "JSON Schema enum must be an array of strings",
+            });
+        }
+        result.enum_values.emplace();
+        for (const auto& value : *values) {
+            if (!value.is_string()) {
+                return std::unexpected(Error{
+                    .code = ErrorCode::json_deserialization,
+                    .message = "JSON Schema enum values must be strings",
+                });
+            }
+            result.enum_values->push_back(value.get<std::string>());
+        }
+    }
+    if (source.contains("properties")) {
+        const auto* properties = source["properties"].get_if<glz::generic::object_t>();
+        if (!properties) {
+            return std::unexpected(Error{
+                .code = ErrorCode::json_deserialization,
+                .message = "JSON Schema properties must be an object",
+            });
+        }
+        result.properties.emplace();
+        for (const auto& [name, value] : *properties) {
+            auto child = schema_from_generic(value);
+            if (!child) return std::unexpected(child.error());
+            result.properties->emplace(name, std::make_shared<Schema>(std::move(*child)));
+        }
+    }
+    if (source.contains("required")) {
+        const auto* required = source["required"].get_if<glz::generic::array_t>();
+        if (!required) {
+            return std::unexpected(Error{
+                .code = ErrorCode::json_deserialization,
+                .message = "JSON Schema required must be an array of strings",
+            });
+        }
+        result.required.emplace();
+        for (const auto& name : *required) {
+            if (!name.is_string()) {
+                return std::unexpected(Error{
+                    .code = ErrorCode::json_deserialization,
+                    .message = "JSON Schema required entries must be strings",
+                });
+            }
+            result.required->push_back(name.get<std::string>());
+        }
+    }
+    if (source.contains("items")) {
+        auto items = schema_from_generic(source["items"]);
+        if (!items) return std::unexpected(items.error());
+        result.items = std::make_shared<Schema>(std::move(*items));
+    }
+    if (source.contains("additionalProperties")) {
+        if (!source["additionalProperties"].is_boolean()) {
+            return std::unexpected(Error{
+                .code = ErrorCode::json_deserialization,
+                .message = "JSON Schema additionalProperties must be a boolean",
+            });
+        }
+        result.additional_properties = source["additionalProperties"].get<bool>();
+    }
+    if (source.contains("minItems")) {
+        auto min_items = schema_size_from_generic(source["minItems"], "minItems");
+        if (!min_items) return std::unexpected(min_items.error());
+        result.min_items = *min_items;
+    }
+    if (source.contains("maxItems")) {
+        auto max_items = schema_size_from_generic(source["maxItems"], "maxItems");
+        if (!max_items) return std::unexpected(max_items.error());
+        result.max_items = *max_items;
+    }
+    return result;
+}
+
+} // namespace detail
+
+[[nodiscard]] inline Result<Schema> schema_from_json(std::string_view json)
+{
+    glz::generic value;
+    if (const auto error = glz::read_json(value, json); error) {
+        return std::unexpected(Error{
+            .code = ErrorCode::json_deserialization,
+            .message = glz::format_error(error, json),
+            .byte_offset = error.count,
+        });
+    }
+    return detail::schema_from_generic(value);
+}
+
 } // namespace cail
 
 namespace glz {
@@ -231,7 +410,9 @@ struct meta<cail::Schema> {
         "properties", &T::properties,
         "required", &T::required,
         "items", &T::items,
-        "additionalProperties", &T::additional_properties);
+        "additionalProperties", &T::additional_properties,
+        "minItems", &T::min_items,
+        "maxItems", &T::max_items);
 };
 
 } // namespace glz
