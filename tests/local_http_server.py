@@ -72,7 +72,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             blocks = [block for message in body.get("messages", []) for block in message.get("content", [])]
             valid = (self.headers.get("Authorization") == "Bearer test-key" and
                      self.headers.get("anthropic-version") == "2023-06-01" and
-                     body.get("max_tokens") == 256 and body.get("system") == "Be concise." and
+                     body.get("max_tokens") == 256 and
+                     body.get("system") == [{"type": "text", "text": "Be concise."}] and
                      body.get("tools", [{}])[0].get("input_schema", {}).get("type") == "object" and
                      any(block.get("type") == "image" and
                          block.get("source", {}).get("data") == "QQBC" for block in blocks) and
