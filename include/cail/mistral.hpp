@@ -14,6 +14,8 @@ using MistralProvider = detail::ChatCompletionsPresetProvider<MistralTag>;
 
 [[nodiscard]] inline MistralProvider create_mistral(MistralSettings settings = {})
 {
+    settings.prompt_cache_key = true;
+    settings.retain_reasoning_content = false;
     return MistralProvider{std::move(settings)};
 }
 

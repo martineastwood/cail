@@ -16,6 +16,9 @@ struct ChatCompletionsPresetSettings {
     std::vector<HttpHeader> headers;
     std::string endpoint{Tag::endpoint};
     std::string request_session_header;
+    bool prompt_cache_key = false;
+    bool session_body = false;
+    bool retain_reasoning_content = true;
 };
 
 namespace detail {
@@ -39,6 +42,9 @@ class ChatCompletionsPresetProvider {
             .api_key = env_or(settings_.api_key, Tag::env_var),
             .headers = settings_.headers,
             .request_session_header = settings_.request_session_header,
+            .prompt_cache_key = settings_.prompt_cache_key,
+            .session_body = settings_.session_body,
+            .retain_reasoning_content = settings_.retain_reasoning_content,
         })(std::move(model_id), std::move(transport));
     }
 

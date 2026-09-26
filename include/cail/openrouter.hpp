@@ -14,6 +14,8 @@ using OpenRouterProvider = detail::ChatCompletionsPresetProvider<OpenRouterTag>;
 
 [[nodiscard]] inline OpenRouterProvider create_openrouter(OpenRouterSettings settings = {})
 {
+    settings.prompt_cache_key = true;
+    settings.session_body = true;
     return OpenRouterProvider{std::move(settings)};
 }
 

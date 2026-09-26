@@ -34,6 +34,7 @@ struct Config {
   std::string model;
   std::string base_url{"https://api.openai.com/v1"};
   std::string request_session_header;
+  bool prompt_cache_key = false;
 };
 
 
@@ -321,6 +322,22 @@ private:
     auto encoded = to_json(body);
     if (!encoded) {
       return std::unexpected(encoded.error());
+    }
+    if (config_.prompt_cache_key && !request.session_id.empty()) {
+      glz::generic cache_key = glz::generic::object_t{};
+      cache_key["prompt_cache_key"] = request.session_id;
+      auto dumped = cache_key.dump();
+      if (!dumped) {
+        return std::unexpected(Error{
+            .code = ErrorCode::json_serialization,
+            .message = "Could not encode the OpenAI prompt cache key.",
+        });
+      }
+      auto merged = merge_json_objects(*encoded, *dumped);
+      if (!merged) {
+        return std::unexpected(merged.error());
+      }
+      encoded = std::move(*merged);
     }
     if (request.provider_options) {
       auto options = *request.provider_options;

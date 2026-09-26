@@ -158,6 +158,9 @@ int main(int argc, char** argv)
         .tools = {cail::make_tool<Answer>("search", "Search")},
     };
     const auto mapped = validating_anthropic.generate(mapping_request);
+    if (!mapped) {
+        std::cerr << mapped.error().message << '\n';
+    }
     check(mapped && mapped->text == "Done", "Anthropic request maps images, tool history, schema, and headers");
     cail::detail::anthropic::Client structured_anthropic({
         .api_key = "test-key", .model = "test-model", .base_url = base + "/anthropic/structured"});

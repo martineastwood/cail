@@ -83,6 +83,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if valid:
                 self.send_json(200, {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done"}]})
             else:
+                sys.stderr.write(json.dumps(body) + "\n")
                 self.send_json(400, {"error": {"type": "invalid_request_error", "message": "bad request mapping"}})
         elif self.path == "/anthropic/messages" and body.get("stream"):
             self.send_stream([

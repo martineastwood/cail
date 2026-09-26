@@ -180,7 +180,54 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
     };
 }
 
-[[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body)
+[[nodiscard]] inline std::optional<std::string> round_trip_options(
+    bool retain_reasoning_content, std::string_view reasoning_content,
+    const std::optional<std::string>& reasoning_details_json)
+{
+    glz::generic options = glz::generic::object_t{};
+    if (retain_reasoning_content && !reasoning_content.empty()) {
+        options["reasoning_content"] = std::string{reasoning_content};
+    }
+    if (reasoning_details_json && !reasoning_details_json->empty()) {
+        glz::generic details;
+        if (const auto error = glz::read_json(details, *reasoning_details_json); error) {
+            return std::nullopt;
+        }
+        options["reasoning_details"] = std::move(details);
+    }
+    if (!options.is_object() || options.get<glz::generic::object_t>().empty()) {
+        return std::nullopt;
+    }
+    auto encoded = options.dump();
+    if (!encoded) {
+        return std::nullopt;
+    }
+    return std::move(*encoded);
+}
+
+[[nodiscard]] inline std::optional<std::string> without_reasoning_content(
+    const std::optional<std::string>& provider_options)
+{
+    if (!provider_options) {
+        return std::nullopt;
+    }
+    glz::generic value;
+    if (const auto error = glz::read_json(value, *provider_options); error || !value.is_object()) {
+        return provider_options;
+    }
+    auto& object = value.get<glz::generic::object_t>();
+    object.erase("reasoning_content");
+    if (object.empty()) {
+        return std::nullopt;
+    }
+    auto encoded = value.dump();
+    if (!encoded) {
+        return provider_options;
+    }
+    return std::move(*encoded);
+}
+
+[[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body, bool retain_reasoning_content)
 {
     if (body.choices.size() != 1 || body.choices.front().index != 0 || !body.choices.front().message) {
         return std::unexpected(Error{.code = ErrorCode::provider_response,
@@ -197,9 +244,9 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
     }
     if (message.refusal) result.text = *message.refusal;
     result.reasoning += message.reasoning_content.value_or("");
-    if (message.reasoning_details) {
-        result.provider_options = "{\"reasoning_details\":" + message.reasoning_details->str + "}";
-    }
+    result.provider_options = round_trip_options(
+        retain_reasoning_content, message.reasoning_content.value_or(""),
+        message.reasoning_details ? std::optional<std::string>{message.reasoning_details->str} : std::nullopt);
     if (message.refusal) {
         result.status = GenerationStatus::refused;
     } else if (choice.finish_reason == "length") {
@@ -225,7 +272,8 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
     return result;
 }
 
-[[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, std::string model, bool streaming)
+[[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, std::string model,
+    bool streaming, bool retain_reasoning_content)
 {
     if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
         return std::unexpected(valid.error());
@@ -259,8 +307,11 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
             },
         };
     }
-    const auto append_message = [&body](InputMessage item,
-                                         const std::optional<std::string>& provider_options) -> Result<void> {
+    const auto append_message = [&body, retain_reasoning_content](InputMessage item,
+                                         std::optional<std::string> provider_options) -> Result<void> {
+        if (!retain_reasoning_content) {
+            provider_options = without_reasoning_content(provider_options);
+        }
         auto encoded = to_json(item);
         if (!encoded) return std::unexpected(encoded.error());
         if (provider_options) {
@@ -419,10 +470,12 @@ class Client {
 public:
     Client(std::string endpoint, std::string model, std::string api_key, std::vector<HttpHeader> headers,
            std::unique_ptr<HttpTransport> transport = std::make_unique<cail::detail::GlazeHttpTransport>(),
-           std::string request_session_header = {})
+           std::string request_session_header = {}, bool prompt_cache_key = false, bool session_body = false,
+           bool retain_reasoning_content = true)
         : endpoint_(std::move(endpoint)), model_(std::move(model)), api_key_(std::move(api_key)),
           headers_(std::move(headers)), transport_(std::move(transport)),
-          request_session_header_(std::move(request_session_header)) {}
+          request_session_header_(std::move(request_session_header)), prompt_cache_key_(prompt_cache_key),
+          session_body_(session_body), retain_reasoning_content_(retain_reasoning_content) {}
 
     [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const
     {
@@ -441,10 +494,21 @@ private:
         if (stop.stop_requested()) return std::unexpected(generation_cancelled_error());
         if (endpoint_.empty() || !transport_) return std::unexpected(Error{
             .code = ErrorCode::invalid_configuration, .message = "Chat Completions requires an endpoint and transport."});
-        auto body = encode(request, model_, static_cast<bool>(on_event));
+        auto body = encode(request, model_, static_cast<bool>(on_event), retain_reasoning_content_);
         if (!body) return std::unexpected(body.error());
         auto encoded = to_json(*body);
         if (!encoded) return std::unexpected(encoded.error());
+        if (!request.session_id.empty() && (prompt_cache_key_ || session_body_)) {
+            glz::generic routing = glz::generic::object_t{};
+            if (session_body_) routing["session_id"] = request.session_id;
+            if (prompt_cache_key_) routing["prompt_cache_key"] = request.session_id;
+            auto dumped = routing.dump();
+            if (!dumped) return std::unexpected(Error{.code = ErrorCode::json_serialization,
+                .message = "Could not encode Chat Completions session routing."});
+            auto merged = merge_json_objects(*encoded, *dumped);
+            if (!merged) return std::unexpected(merged.error());
+            encoded = std::move(*merged);
+        }
         if (request.provider_options) {
             auto merged = merge_json_objects(*encoded, *request.provider_options);
             if (!merged) return std::unexpected(merged.error());
@@ -470,6 +534,7 @@ private:
         GenerationResponse partial;
         std::map<std::size_t, cail::ToolCall> pending_calls;
         std::vector<glz::raw_json> reasoning_details;
+        std::string echoed_reasoning;
         bool finished = false;
         bool done = false;
         std::optional<Error> stream_error;
@@ -515,6 +580,7 @@ private:
                     }
                     if (delta.reasoning_content) {
                         partial.reasoning += *delta.reasoning_content;
+                        echoed_reasoning += *delta.reasoning_content;
                         on_event(StreamEvent{ReasoningDelta{.text = *delta.reasoning_content}});
                     }
                     if (delta.reasoning_details) {
@@ -537,12 +603,6 @@ private:
                         if (!reasoning_text.empty()) {
                             on_event(StreamEvent{ReasoningDelta{.text = reasoning_text}});
                         }
-                        auto details_json = to_json(reasoning_details);
-                        if (!details_json) {
-                            stream_error = details_json.error();
-                            return;
-                        }
-                        partial.provider_options = "{\"reasoning_details\":" + *details_json + "}";
                     }
                     if (delta.tool_calls) {
                         for (std::size_t index = 0; index < delta.tool_calls->size(); ++index) {
@@ -603,7 +663,7 @@ private:
             if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response->body); error)
                 return context(Error{.code = ErrorCode::provider_response,
                                      .message = glz::format_error(error, response->body)});
-            auto result = decode(parsed);
+            auto result = decode(parsed, retain_reasoning_content_);
             return result ? result : context(result.error());
         }
         parser.finish(handle_event);
@@ -616,6 +676,13 @@ private:
             partial.tool_calls.push_back(call);
             on_event(StreamEvent{ToolCallReady{.output_index = index, .call = call}});
         }
+        std::optional<std::string> details_json;
+        if (!reasoning_details.empty()) {
+            auto encoded_details = to_json(reasoning_details);
+            if (!encoded_details) return context(encoded_details.error());
+            details_json = std::move(*encoded_details);
+        }
+        partial.provider_options = round_trip_options(retain_reasoning_content_, echoed_reasoning, details_json);
         return partial;
     }
 
@@ -625,6 +692,9 @@ private:
     std::vector<HttpHeader> headers_;
     std::unique_ptr<HttpTransport> transport_;
     std::string request_session_header_;
+    bool prompt_cache_key_ = false;
+    bool session_body_ = false;
+    bool retain_reasoning_content_ = true;
 };
 
 } // namespace cail::detail::chat_completions
@@ -636,6 +706,9 @@ struct ChatCompletionsSettings {
     std::string api_key;
     std::vector<HttpHeader> headers;
     std::string request_session_header;
+    bool prompt_cache_key = false;
+    bool session_body = false;
+    bool retain_reasoning_content = true;
 };
 
 [[nodiscard]] constexpr AdapterCapabilities chat_completions_adapter_capabilities()
@@ -661,7 +734,8 @@ public:
     {
         auto client = std::make_shared<detail::chat_completions::Client>(
             settings_.endpoint, std::move(model_id), settings_.api_key, settings_.headers,
-            std::move(transport), settings_.request_session_header);
+            std::move(transport), settings_.request_session_header, settings_.prompt_cache_key,
+            settings_.session_body, settings_.retain_reasoning_content);
         return LanguageModel{
             [client](const GenerationRequest& request) { return client->generate(request); },
             [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {

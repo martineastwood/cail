@@ -31,6 +31,7 @@ struct OpenCodeSettings {
     std::string api_key;
     OpenCodeService service{OpenCodeService::zen};
     std::string base_url;
+    std::size_t anthropic_max_tokens{1024};
 };
 
 namespace detail::opencode {
@@ -135,6 +136,7 @@ public:
                     .api_key = key,
                     .model = std::move(model_id),
                     .base_url = root,
+                    .max_tokens = settings_.anthropic_max_tokens,
                     .request_session_header = session_header,
                 },
                 std::move(transport));

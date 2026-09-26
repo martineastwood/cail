@@ -47,6 +47,7 @@ class OpenAiResponsesPresetProvider {
             .api_key = env_or(settings_.api_key, Tag::env_var),
             .model = std::move(model_id),
             .base_url = settings_.base_url,
+            .prompt_cache_key = true,
         }, std::move(transport));
         return language_model_from(client);
     }
