@@ -12,7 +12,10 @@ namespace cail {
 template <typename T>
 [[nodiscard]] Result<std::string> to_json(const T& value)
 {
-    auto result = glz::write_json(value);
+    struct WriteOptions : glz::opts {
+        bool escape_control_characters = true;
+    };
+    auto result = glz::write<WriteOptions{}>(value);
     if (!result) {
         return std::unexpected(Error{
             .code = ErrorCode::json_serialization,
@@ -63,7 +66,7 @@ template <typename T>
     for (const auto& [key, value] : fields.get<glz::generic::object_t>()) {
         target[key] = value;
     }
-    auto encoded = target.dump();
+    auto encoded = to_json(target);
     if (!encoded) {
         return std::unexpected(Error{
             .code = ErrorCode::json_serialization,

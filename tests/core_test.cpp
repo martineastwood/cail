@@ -9,6 +9,25 @@
 
 namespace test {
 
+void test_control_character_json() {
+  std::string controls;
+  for (int ch = 0; ch < 32; ++ch) controls += static_cast<char>(ch);
+  const auto encoded = cail::to_json(Address{.city = controls});
+  check(encoded.has_value(), "control characters serialize");
+  if (!encoded) return;
+  const auto decoded = cail::from_json<Address>(*encoded);
+  check(decoded && decoded->city == controls,
+        "JSON preserves every control character");
+  const auto merged = cail::merge_json_objects(*encoded, R"({"extra":"\u0000"})");
+  check(merged.has_value(), "provider options merge with control characters");
+  if (!merged) return;
+  glz::generic parsed;
+  const auto error = glz::read_json(parsed, *merged);
+  check(!error && parsed["city"].get<std::string>() == controls &&
+            parsed["extra"].get<std::string>() == std::string(1, '\0'),
+        "merged JSON preserves control characters in both objects");
+}
+
 void test_field_value_api() {
   cail::Field<double> confidence{
       .value = 0.5,
@@ -124,6 +143,7 @@ void test_tool_loop() {
 } // namespace test
 
 int main() {
+  test::test_control_character_json();
   test::test_field_value_api();
   test::test_optional_schema_and_json();
   test::test_tool_loop();
