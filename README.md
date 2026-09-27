@@ -14,7 +14,7 @@ A typed C++ SDK for LLM providers, with a provider-neutral model and generation 
 Install CAIL and its pinned dependencies to a prefix:
 
 ```sh
-cmake -S . -B build -DCAIL_BUILD_EXAMPLES=OFF
+cmake -S . -B build -DCAIL_BUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF
 cmake --build build
 cmake --install build --prefix /path/to/cail
 ```
@@ -27,6 +27,20 @@ target_link_libraries(app PRIVATE cail::cail)
 ```
 
 Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
+
+## Run a focused test suite
+
+Build and run only the OpenAI adapter tests:
+
+```sh
+cmake -S . -B build -DCAIL_BUILD_EXAMPLES=OFF
+cmake --build build --target cail_openai_test
+ctest --test-dir build --output-on-failure -R '^cail_openai$'
+```
+
+Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`,
+and `cail_opencode`. Use the matching `cail_<suite>_test` target to build one
+group. CAIL also provides `cail_local_http` and `cail_install_smoke` checks.
 
 ## Current implementation
 
