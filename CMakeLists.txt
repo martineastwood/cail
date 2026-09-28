@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.31)
 
-project(cail VERSION 0.1.2 LANGUAGES CXX)
+project(cail VERSION 0.1.3 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
