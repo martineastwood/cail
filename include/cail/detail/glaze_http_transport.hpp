@@ -18,6 +18,8 @@ namespace cail::detail {
 
 class GlazeHttpTransport final : public HttpTransport {
     public:
+    GlazeHttpTransport() { client_.set_graceful_ssl_shutdown(false); }
+
     [[nodiscard]] Result<HttpResponse> send(const HttpRequest& request) override {
         glz::http_headers headers;
         for (const auto& header : request.headers) {
