@@ -1,6 +1,6 @@
 {
   "name": "cail",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "A typed C++ SDK for LLM providers, with a provider-neutral model and generation API",
   "homepage": "https://github.com/martineastwood/cail",
   "license": "MIT",

@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Check and publish release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev ninja-build python3-venv
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
+            cmake==3.31.10 clang-format==23.1.1
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Check release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="$(sed -nE 's/^project\(cail VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "Release tag $TAG does not match CAIL version $version" >&2
+            exit 1
+          fi
+
+      - name: Build and test
+        env:
+          CXX: g++
+        run: ./dev check
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes
