@@ -81,6 +81,7 @@ add_library(cail INTERFACE)
 add_library(cail::cail ALIAS cail)
 
 target_compile_features(cail INTERFACE cxx_std_23)
+target_compile_options(cail INTERFACE "$<$<PLATFORM_ID:Darwin>:-fexperimental-library>")
 # Glaze creates glaze::asio dynamically, so carry its build requirements here
 # and reattach the target from the installed package config.
 target_include_directories(cail INTERFACE

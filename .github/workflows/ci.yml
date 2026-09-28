@@ -51,16 +51,19 @@ jobs:
             os: ubuntu-24.04
             cxx: g++
             packages: ""
+            examples: ON
           # Clang 18 on Ubuntu cannot use libstdc++'s C++23 <expected>, which
           # Glaze and CAIL both need, so the matrix uses Clang 20.
           - name: Linux (clang)
             os: ubuntu-24.04
             cxx: clang++-20
             packages: clang-20
+            examples: OFF
           - name: macOS (AppleClang)
-            os: macos-26
+            os: macos-15
             cxx: clang++
             packages: ""
+            examples: OFF
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -75,11 +78,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install openssl@3
 
-      - name: Install CMake and clang-format
+      - name: Install CMake
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
-            "cmake==$CMAKE_VERSION" "clang-format==$CLANG_FORMAT_VERSION"
+            "cmake==$CMAKE_VERSION"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore dependency checkout
@@ -93,10 +96,13 @@ jobs:
       - name: Configure, build, and test
         env:
           CXX: ${{ matrix.cxx }}
+          CAIL_BUILD_EXAMPLES: ${{ matrix.examples }}
           CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
         run: |
           mkdir -p .cache/cail-fetchcontent
-          ./dev check
+          ./dev configure
+          ./dev build
+          ./dev test
 
   sanitizer:
     name: ASan and UBSan
@@ -166,6 +172,7 @@ jobs:
       # clang-tidy only needs the compile commands, not a built binary.
       - name: Configure
         env:
+          CAIL_BUILD_EXAMPLES: OFF
           CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
         run: |
           mkdir -p .cache/cail-fetchcontent

@@ -70,6 +70,7 @@ Extra arguments after a directory are passed to CMake, for example:
 Environment:
   BUILD_DIR             Default build directory (build/dev)
   JOBS                  Parallel job count
+  CAIL_BUILD_EXAMPLES   Build examples during configure (default: ON)
   CAIL_FETCHCONTENT_BASE_DIR
                         Reuse a shared dependency checkout
 EOF
@@ -112,7 +113,7 @@ cmd_configure() {
     cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
   log "configure ($dir)"
   cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}" \
-    -DCAIL_BUILD_EXAMPLES=ON -DBUILD_TESTING=ON \
+    -DCAIL_BUILD_EXAMPLES="${CAIL_BUILD_EXAMPLES:-ON}" -DBUILD_TESTING=ON \
     ${cache[@]+"${cache[@]}"} ${1+"$@"}
 }
 
@@ -140,7 +141,11 @@ cmd_tidy() {
     die "missing $BUILD_DIR/compile_commands.json; run ./dev configure first"
 
   local args=(-p "$BUILD_DIR" -quiet)
-  [[ "${1:-}" == "--fix" ]] && args+=(-fix)
+  local tidy_jobs="$JOBS"
+  if [[ "${1:-}" == "--fix" ]]; then
+    args+=(-fix)
+    tidy_jobs=1
+  fi
 
   local sdkroot
   sdkroot="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
@@ -150,7 +155,7 @@ cmd_tidy() {
   files="$(tidy_files)"
   log "tidy ($(echo "$files" | wc -l | tr -d ' ') translation units)"
   # shellcheck disable=SC2086
-  "$clang_tidy" "${args[@]}" $files
+  printf '%s\n' $files | xargs -n 1 -P "$tidy_jobs" "$clang_tidy" "${args[@]}"
 }
 
 cmd_sanitizer() {
