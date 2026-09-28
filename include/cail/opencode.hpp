@@ -93,7 +93,7 @@ public:
   explicit OpenCodeProvider(OpenCodeSettings settings) : settings_(std::move(settings)) {}
 
   [[nodiscard]] LanguageModel operator()(std::string model_id, OpenCodeApiFamily api_family) const {
-    return (*this)(std::move(model_id), api_family, std::make_unique<detail::GlazeHttpTransport>());
+    return (*this)(std::move(model_id), api_family, make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(std::string model_id, OpenCodeApiFamily api_family,

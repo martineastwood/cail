@@ -98,6 +98,19 @@ public:
     return response;
   }
 
+  [[nodiscard]] cail::Result<cail::GenerationResponse>
+  stream(const cail::GenerationRequest& request, const cail::StreamHandler& on_event,
+         std::stop_token stop) const {
+    if (stop.stop_requested()) {
+      return std::unexpected(cail::generation_cancelled_error());
+    }
+    auto response = generate(request);
+    if (response && !response->text.empty()) {
+      on_event(cail::TextDelta{.text = response->text});
+    }
+    return response;
+  }
+
   mutable std::vector<cail::GenerationRequest> requests;
 
 private:

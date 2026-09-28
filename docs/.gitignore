@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
+
+# build output
+node_modules/
+dist/
+.astro/

@@ -186,7 +186,7 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
   };
 }
 
-[[nodiscard]] inline std::optional<std::string>
+[[nodiscard]] inline ProviderOptions
 round_trip_options(bool retain_reasoning_content, std::string_view reasoning_content,
                    const std::optional<std::string>& reasoning_details_json) {
   glz::generic options = glz::generic::object_t{};
@@ -196,39 +196,16 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
   if (reasoning_details_json && !reasoning_details_json->empty()) {
     glz::generic details;
     if (const auto error = glz::read_json(details, *reasoning_details_json); error) {
-      return std::nullopt;
+      return {};
     }
     options["reasoning_details"] = std::move(details);
   }
-  if (!options.is_object() || options.get<glz::generic::object_t>().empty()) {
-    return std::nullopt;
-  }
-  auto encoded = options.dump();
-  if (!encoded) {
-    return std::nullopt;
-  }
-  return std::move(*encoded);
+  return std::move(options.get<glz::generic::object_t>());
 }
 
-[[nodiscard]] inline std::optional<std::string>
-without_reasoning_content(const std::optional<std::string>& provider_options) {
-  if (!provider_options) {
-    return std::nullopt;
-  }
-  glz::generic value;
-  if (const auto error = glz::read_json(value, *provider_options); error || !value.is_object()) {
-    return provider_options;
-  }
-  auto& object = value.get<glz::generic::object_t>();
-  object.erase("reasoning_content");
-  if (object.empty()) {
-    return std::nullopt;
-  }
-  auto encoded = value.dump();
-  if (!encoded) {
-    return provider_options;
-  }
-  return std::move(*encoded);
+[[nodiscard]] inline ProviderOptions without_reasoning_content(ProviderOptions provider_options) {
+  provider_options.erase("reasoning_content");
+  return provider_options;
 }
 
 [[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body,
@@ -323,17 +300,17 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
             },
     };
   }
-  const auto append_message = [&body, retain_reasoning_content](
-                                  InputMessage item,
-                                  std::optional<std::string> provider_options) -> Result<void> {
+  const auto append_message =
+      [&body, retain_reasoning_content](InputMessage item,
+                                        ProviderOptions provider_options) -> Result<void> {
     if (!retain_reasoning_content) {
       provider_options = without_reasoning_content(provider_options);
     }
     auto encoded = to_json(item);
     if (!encoded)
       return std::unexpected(encoded.error());
-    if (provider_options) {
-      auto merged = merge_json_objects(*encoded, *provider_options);
+    if (!provider_options.empty()) {
+      auto merged = merge_json_objects(*encoded, provider_options);
       if (!merged)
         return std::unexpected(merged.error());
       encoded = std::move(*merged);
@@ -425,8 +402,8 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
           if (!encoded)
             return std::unexpected(encoded.error());
           auto provider_part_options = image.provider_options;
-          if (provider_part_options) {
-            auto merged = merge_json_objects(*encoded, *provider_part_options);
+          if (!provider_part_options.empty()) {
+            auto merged = merge_json_objects(*encoded, provider_part_options);
             if (!merged)
               return std::unexpected(merged.error());
             encoded = std::move(*merged);
@@ -440,7 +417,7 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
       item.content = glz::raw_json{std::move(*encoded)};
     } else if (message.content.size() == 1 &&
                std::holds_alternative<cail::TextPart>(message.content.front()) &&
-               !std::get<cail::TextPart>(message.content.front()).provider_options) {
+               std::get<cail::TextPart>(message.content.front()).provider_options.empty()) {
       auto encoded = to_json(std::get<cail::TextPart>(message.content.front()).text);
       if (!encoded)
         return std::unexpected(encoded.error());
@@ -460,8 +437,8 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
         Result<std::string> encoded = std::unexpected(Error{});
         if (const auto* text = std::get_if<cail::TextPart>(&part)) {
           encoded = to_json(TextPart{.text = text->text});
-          if (encoded && text->provider_options) {
-            encoded = merge_json_objects(*encoded, *text->provider_options);
+          if (encoded && !text->provider_options.empty()) {
+            encoded = merge_json_objects(*encoded, text->provider_options);
           }
         } else if (const auto* image = std::get_if<cail::ImagePart>(&part)) {
           if (image->mime_type.empty()) {
@@ -470,8 +447,8 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
           }
           encoded = to_json(ImagePart{.image_url = ImageUrl{.url = cail::detail::image_data_url(
                                                                 image->mime_type, image->bytes)}});
-          if (encoded && image->provider_options) {
-            encoded = merge_json_objects(*encoded, *image->provider_options);
+          if (encoded && !image->provider_options.empty()) {
+            encoded = merge_json_objects(*encoded, image->provider_options);
           }
         }
         if (!encoded)
@@ -505,8 +482,8 @@ without_reasoning_content(const std::optional<std::string>& provider_options) {
                                      .parameters = glz::raw_json{std::move(*parameters)}}});
       if (!encoded)
         return std::unexpected(encoded.error());
-      if (tool.provider_options) {
-        auto merged = merge_json_objects(*encoded, *tool.provider_options);
+      if (!tool.provider_options.empty()) {
+        auto merged = merge_json_objects(*encoded, tool.provider_options);
         if (!merged)
           return std::unexpected(merged.error());
         encoded = std::move(*merged);
@@ -521,8 +498,7 @@ class Client {
 public:
   Client(std::string endpoint, std::string model, std::string api_key,
          std::vector<HttpHeader> headers,
-         std::unique_ptr<HttpTransport> transport =
-             std::make_unique<cail::detail::GlazeHttpTransport>(),
+         std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport(),
          std::string request_session_header = {}, bool prompt_cache_key = false,
          bool session_body = false, bool retain_reasoning_content = true)
       : endpoint_(std::move(endpoint)), model_(std::move(model)), api_key_(std::move(api_key)),
@@ -561,18 +537,13 @@ private:
         routing["session_id"] = request.session_id;
       if (prompt_cache_key_)
         routing["prompt_cache_key"] = request.session_id;
-      auto dumped = routing.dump();
-      if (!dumped)
-        return std::unexpected(
-            Error{.code = ErrorCode::json_serialization,
-                  .message = "Could not encode Chat Completions session routing."});
-      auto merged = merge_json_objects(*encoded, *dumped);
+      auto merged = merge_json_objects(*encoded, routing.get<glz::generic::object_t>());
       if (!merged)
         return std::unexpected(merged.error());
       encoded = std::move(*merged);
     }
-    if (request.provider_options) {
-      auto merged = merge_json_objects(*encoded, *request.provider_options);
+    if (!request.provider_options.empty()) {
+      auto merged = merge_json_objects(*encoded, request.provider_options);
       if (!merged)
         return std::unexpected(merged.error());
       encoded = std::move(*merged);
@@ -584,17 +555,8 @@ private:
     if (on_event)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
     cail::detail::append_session_header(http.headers, request_session_header_, request.session_id);
-    if (request.before_request) {
-      try {
-        request.before_request(http);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::invalid_configuration,
-                  .message = std::string{"The before-request callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                     .message = "The before-request callback failed."});
-      }
+    if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
+      return std::unexpected(middleware.error());
     }
     cail::detail::SseParser parser;
     GenerationResponse partial;
@@ -719,17 +681,8 @@ private:
             : transport_->send(http);
     if (!response)
       return std::unexpected(response.error());
-    if (request.after_response) {
-      try {
-        request.after_response(*response);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::provider_response,
-                  .message = std::string{"The after-response callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                     .message = "The after-response callback failed."});
-      }
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+      return std::unexpected(middleware.error());
     }
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
@@ -821,7 +774,7 @@ public:
   explicit ChatCompletionsProvider(ChatCompletionsSettings settings)
       : settings_(std::move(settings)) {}
   [[nodiscard]] LanguageModel operator()(std::string model_id) const {
-    return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    return (*this)(std::move(model_id), make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,

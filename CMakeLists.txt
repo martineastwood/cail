@@ -141,6 +141,9 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_openai_tool_call examples/openai_tool_call.cpp)
     target_link_libraries(cail_openai_tool_call PRIVATE cail::cail)
 
+    add_executable(cail_openai_agent examples/openai_agent.cpp)
+    target_link_libraries(cail_openai_agent PRIVATE cail::cail)
+
     add_executable(cail_openai_embed examples/openai_embed.cpp)
     target_link_libraries(cail_openai_embed PRIVATE cail::cail)
 

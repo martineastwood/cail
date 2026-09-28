@@ -343,7 +343,11 @@ struct ThinkingBlock {
   auto encoded = to_json(blocks);
   if (!encoded)
     return std::unexpected(encoded.error());
-  result.provider_options = "{\"reasoning_details\":" + *encoded + "}";
+  glz::generic details;
+  if (const auto error = glz::read_json(details, *encoded); error)
+    return std::unexpected(Error{.code = ErrorCode::json_deserialization,
+                                 .message = glz::format_error(error, *encoded)});
+  result.provider_options["reasoning_details"] = std::move(details);
   return {};
 }
 
@@ -387,16 +391,11 @@ struct ThinkingBlock {
   if (const auto error = glz::read_json(body, encoded); error)
     return std::unexpected(Error{.code = ErrorCode::json_deserialization,
                                  .message = glz::format_error(error, encoded)});
-  const auto cache = [](glz::generic& target,
-                        const std::optional<std::string>& options) -> Result<void> {
-    if (!options)
+  const auto cache = [](glz::generic& target, const ProviderOptions& options) -> Result<void> {
+    if (options.empty())
       return {};
-    glz::generic fields;
-    if (const auto error = glz::read_json(fields, *options); error)
-      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                   .message = glz::format_error(error, *options)});
-    if (fields.is_object() && fields.contains("cache_control"))
-      target["cache_control"] = fields["cache_control"];
+    if (options.contains("cache_control"))
+      target["cache_control"] = options.at("cache_control");
     return {};
   };
   glz::generic::array_t system;
@@ -434,24 +433,19 @@ struct ThinkingBlock {
           return std::unexpected(result.error());
         ++part_index;
       }
-      if (message.role == MessageRole::assistant && message.provider_options) {
-        glz::generic options;
-        if (const auto error = glz::read_json(options, *message.provider_options); error)
-          return std::unexpected(
-              Error{.code = ErrorCode::invalid_configuration,
-                    .message = glz::format_error(error, *message.provider_options)});
-        if (options.is_object() && options.contains("reasoning_details")) {
-          if (const auto* details = options["reasoning_details"].get_if<glz::generic::array_t>()) {
-            glz::generic::array_t thinking;
-            for (const auto& block : *details) {
-              if (!block.is_object() || !block.contains("type"))
-                continue;
-              const auto* type = block["type"].get_if<std::string>();
-              if (type && (*type == "thinking" || *type == "redacted_thinking"))
-                thinking.push_back(block);
-            }
-            parts.insert(parts.begin(), thinking.begin(), thinking.end());
+      if (message.role == MessageRole::assistant &&
+          message.provider_options.contains("reasoning_details")) {
+        if (const auto* details =
+                message.provider_options.at("reasoning_details").get_if<glz::generic::array_t>()) {
+          glz::generic::array_t thinking;
+          for (const auto& block : *details) {
+            if (!block.is_object() || !block.contains("type"))
+              continue;
+            const auto* type = block["type"].get_if<std::string>();
+            if (type && (*type == "thinking" || *type == "redacted_thinking"))
+              thinking.push_back(block);
           }
+          parts.insert(parts.begin(), thinking.begin(), thinking.end());
         }
       }
     }
@@ -474,8 +468,8 @@ struct ThinkingBlock {
 
 class Client {
 public:
-  explicit Client(Config config, std::unique_ptr<HttpTransport> transport =
-                                     std::make_unique<cail::detail::GlazeHttpTransport>())
+  explicit Client(Config config,
+                  std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
       : config_(std::move(config)), transport_(std::move(transport)) {}
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
@@ -507,8 +501,8 @@ private:
     encoded = apply_message_options(*encoded, request);
     if (!encoded)
       return std::unexpected(encoded.error());
-    if (request.provider_options) {
-      auto merged = merge_json_objects(*encoded, *request.provider_options);
+    if (!request.provider_options.empty()) {
+      auto merged = merge_json_objects(*encoded, request.provider_options);
       if (!merged)
         return std::unexpected(merged.error());
       encoded = std::move(*merged);
@@ -526,17 +520,8 @@ private:
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
     if (on_event)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
-    if (request.before_request) {
-      try {
-        request.before_request(http);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::invalid_configuration,
-                  .message = std::string{"The before-request callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                     .message = "The before-request callback failed."});
-      }
+    if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
+      return std::unexpected(middleware.error());
     }
     cail::detail::SseParser parser;
     GenerationResponse partial;
@@ -643,17 +628,8 @@ private:
             : transport_->send(http);
     if (!response)
       return std::unexpected(response.error());
-    if (request.after_response) {
-      try {
-        request.after_response(*response);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::provider_response,
-                  .message = std::string{"The after-response callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                     .message = "The after-response callback failed."});
-      }
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+      return std::unexpected(middleware.error());
     }
 
     if (stop.stop_requested())
@@ -715,7 +691,7 @@ public:
   explicit AnthropicProvider(AnthropicSettings settings = {}) : settings_(std::move(settings)) {}
 
   [[nodiscard]] LanguageModel operator()(std::string model_id) const {
-    return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    return (*this)(std::move(model_id), make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,

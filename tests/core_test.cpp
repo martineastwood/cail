@@ -1,11 +1,13 @@
 #include "test_support.hpp"
 
+#include <cail/agent.hpp>
 #include <cail/field.hpp>
 #include <cail/json.hpp>
 #include <cail/schema.hpp>
 #include <cail/tool.hpp>
 
 #include <algorithm>
+#include <memory>
 
 namespace test {
 
@@ -21,7 +23,7 @@ void test_control_character_json() {
   }
   const auto decoded = cail::from_json<Address>(*encoded);
   check(decoded && decoded->city == controls, "JSON preserves every control character");
-  const auto merged = cail::merge_json_objects(*encoded, R"({"extra":"\u0000"})");
+  const auto merged = cail::merge_json_objects(*encoded, {{"extra", std::string(1, '\0')}});
   check(merged.has_value(), "provider options merge with control characters");
   if (!merged) {
     return;
@@ -94,6 +96,7 @@ void test_optional_schema_and_json() {
 }
 
 void test_tool_loop() {
+  std::vector<std::size_t> observed_steps;
   ScriptedClient client({
       cail::GenerationResponse{
           .tool_calls = {cail::ToolCall{
@@ -113,6 +116,14 @@ void test_tool_loop() {
       cail::GenerationRequest{
           .messages = {cail::Message{.content = {cail::TextPart{.text = "count abc"}}}},
           .session_id = "stable-session",
+          .middleware = {cail::GenerationMiddleware{
+              .after_step =
+                  [&](const cail::Result<cail::GenerationResponse>& response,
+                      const cail::MiddlewareContext& context) {
+                    check(response.has_value(), "step middleware observes successful results");
+                    observed_steps.push_back(context.step);
+                  },
+          }},
       },
       std::vector<cail::Tool>{count_tool});
   check(result && result->text == "counted", "tool loop returns the final model response");
@@ -126,6 +137,147 @@ void test_tool_loop() {
         "tool loop carries the caller session ID");
   check(client.requests.size() == 2 && client.requests[1].messages.front().tool_call_id == "call-1",
         "tool loop sends the result for the matching call");
+  check(observed_steps == std::vector<std::size_t>{0, 1},
+        "middleware observes every model step in a tool loop");
+}
+
+void test_agent() {
+  auto client = std::make_shared<ScriptedClient>(
+      std::vector<cail::GenerationResponse>{cail::GenerationResponse{.text = "hello"}});
+  cail::Agent agent({
+      .model = cail::LanguageModel(
+          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+      .instructions = "Be concise.",
+      .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",
+                                                  [](const ToolInput& input) {
+                                                    return ToolOutput{.count = static_cast<int>(
+                                                                          input.query.size())};
+                                                  })},
+  });
+
+  const auto response = agent.generate("Say hello.");
+  check(response && response->text == "hello", "agent returns the model response");
+  check(client->requests.size() == 1 && client->requests.front().messages.size() == 2,
+        "agent combines its instructions with the prompt");
+  check(client->requests.front().messages.front().role == cail::MessageRole::system &&
+            std::get<cail::TextPart>(client->requests.front().messages.front().content.front())
+                    .text == "Be concise.",
+        "agent sends its instructions as the first system message");
+  check(client->requests.front().tools.size() == 1 &&
+            client->requests.front().tools.front().name == "count",
+        "agent offers its tools on every run");
+}
+
+void test_streaming_tool_loop_and_stop_conditions() {
+  ScriptedClient client({
+      cail::GenerationResponse{
+          .text = "checking",
+          .tool_calls = {cail::ToolCall{
+              .id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}},
+          .provider_options = {{"state", "kept"}},
+      },
+      cail::GenerationResponse{.text = "counted"},
+  });
+  auto count_tool =
+      cail::tool<ToolInput, ToolOutput>("count", "Count characters", [](const ToolInput& input) {
+        return ToolOutput{.count = static_cast<int>(input.query.size())};
+      });
+  std::string streamed;
+  const auto response =
+      cail::stream_tool_loop(client, cail::GenerationRequest{}, std::vector<cail::Tool>{count_tool},
+                             [&](const cail::StreamEvent& event) {
+                               if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+                                 streamed += delta->text;
+                               }
+                             });
+  check(response && response->text == "counted" && streamed == "checkingcounted",
+        "streaming tool loop forwards events from every model step");
+  check(response && response->tool_results.size() == 1,
+        "streaming tool loop executes tools and returns their results");
+  check(client.requests.size() == 2 && client.requests[1].messages.size() == 2 &&
+            client.requests[1].messages.front().provider_options.contains("state"),
+        "tool loop preserves provider metadata on assistant history");
+
+  ScriptedClient stopped_client({cail::GenerationResponse{
+      .tool_calls = {cail::ToolCall{
+          .id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}},
+  }});
+  const auto stopped = cail::run_tool_loop(
+      stopped_client, {}, std::vector<cail::Tool>{count_tool},
+      {.stop_when = [](const cail::GenerationResponse&, const cail::MiddlewareContext& context) {
+        return context.step == 0;
+      }});
+  check(stopped && stopped->tool_calls.size() == 1 && stopped_client.requests.size() == 1,
+        "custom stop condition returns before another tool-loop step");
+
+  std::stop_source cancelled;
+  cancelled.request_stop();
+  const auto cancelled_response =
+      cail::stream_tool_loop(stopped_client, {}, std::vector<cail::Tool>{count_tool},
+                             [](const cail::StreamEvent&) {}, {.stop = cancelled.get_token()});
+  check(!cancelled_response && cancelled_response.error().code == cail::ErrorCode::cancelled,
+        "streaming tool loop honors cancellation before the first step");
+}
+
+void test_transport_retries() {
+  class FlakyTransport final : public cail::HttpTransport {
+  public:
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&) override {
+      ++attempts;
+      return cail::HttpResponse{.status_code = attempts < 3 ? 429 : 200};
+    }
+
+    [[nodiscard]] cail::Result<cail::HttpResponse> stream(const cail::HttpRequest&,
+                                                          const cail::HttpDataHandler& on_data,
+                                                          std::stop_token) override {
+      ++attempts;
+      if (attempts == 1) {
+        return cail::HttpResponse{.status_code = 503};
+      }
+      on_data("done");
+      return cail::HttpResponse{.status_code = 200};
+    }
+
+    int attempts{};
+  };
+
+  auto send_transport = std::make_unique<FlakyTransport>();
+  auto* send_flaky = send_transport.get();
+  cail::RetryingHttpTransport retrying_send(std::move(send_transport),
+                                            {.max_retries = 2, .initial_delay = {}});
+  const auto response = retrying_send.send({});
+  check(response && response->status_code == 200 && send_flaky->attempts == 3,
+        "transport retries 429 responses up to the configured limit");
+
+  auto stream_transport = std::make_unique<FlakyTransport>();
+  auto* stream_flaky = stream_transport.get();
+  cail::RetryingHttpTransport retrying_stream(std::move(stream_transport),
+                                              {.max_retries = 1, .initial_delay = {}});
+  std::string data;
+  const auto stream_response =
+      retrying_stream.stream({}, [&](std::string_view chunk) { data.append(chunk); }, {});
+  check(stream_response && data == "done" && stream_flaky->attempts == 2,
+        "transport retries a 5xx stream before delivering data");
+
+  class TimeoutTransport final : public cail::HttpTransport {
+  public:
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& request) override {
+      timeout = request.timeout;
+      return cail::HttpResponse{.status_code = 200};
+    }
+    [[nodiscard]] cail::Result<cail::HttpResponse>
+    stream(const cail::HttpRequest&, const cail::HttpDataHandler&, std::stop_token) override {
+      return cail::HttpResponse{.status_code = 200};
+    }
+    std::chrono::seconds timeout{};
+  };
+  auto timeout_transport = std::make_unique<TimeoutTransport>();
+  auto* timeout_probe = timeout_transport.get();
+  cail::TimeoutHttpTransport configured_timeout(std::move(timeout_transport),
+                                                std::chrono::seconds{7});
+  static_cast<void>(configured_timeout.send({}));
+  check(timeout_probe->timeout == std::chrono::seconds{7},
+        "transport applies the configured request timeout");
 }
 
 } // namespace test
@@ -135,5 +287,8 @@ int main() {
   test::test_field_value_api();
   test::test_optional_schema_and_json();
   test::test_tool_loop();
+  test::test_agent();
+  test::test_streaming_tool_loop_and_stop_conditions();
+  test::test_transport_retries();
   return test::failures == 0 ? 0 : 1;
 }

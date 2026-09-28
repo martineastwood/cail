@@ -1,0 +1,34 @@
+// @ts-check
+import { defineConfig } from 'astro/config';
+import starlight from '@astrojs/starlight';
+
+// Keep the homepage hero links and the deployed base path in one place.
+// GitHub Pages serves project sites under /cail.
+const base = '/cail';
+
+export default defineConfig({
+	site: 'https://martineastwood.github.io',
+	base,
+	integrations: [
+		starlight({
+			title: 'CAIL',
+			description:
+				'A typed C++ SDK for LLM providers, with a provider-neutral model and generation API.',
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martineastwood/cail' }],
+			sidebar: [
+				{ label: 'Overview', slug: 'index' },
+				{ label: 'Install', slug: 'guides/install' },
+				{ label: 'Quickstart', slug: 'guides/quickstart' },
+				{ label: 'Structured outputs', slug: 'guides/structured-output' },
+				{ label: 'Tools', slug: 'guides/tools' },
+				{ label: 'Agent', slug: 'guides/agent' },
+				{ label: 'Streaming', slug: 'guides/streaming' },
+				{ label: 'Embeddings', slug: 'guides/embeddings' },
+				{ label: 'Providers', slug: 'guides/providers' },
+				{ label: 'Advanced usage', slug: 'guides/advanced' },
+				{ label: 'Compile time', slug: 'reference/compile-time' },
+				{ label: 'Build and test', slug: 'reference/build-and-test' },
+			],
+		}),
+	],
+});

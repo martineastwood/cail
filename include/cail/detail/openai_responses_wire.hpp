@@ -226,7 +226,12 @@ struct StreamEventBody {
     if (!encoded) {
       return std::unexpected(encoded.error());
     }
-    result.provider_options = "{\"reasoning_details\":" + *encoded + "}";
+    glz::generic details;
+    if (const auto error = glz::read_json(details, *encoded); error) {
+      return std::unexpected(Error{.code = ErrorCode::json_deserialization,
+                                   .message = glz::format_error(error, *encoded)});
+    }
+    result.provider_options["reasoning_details"] = std::move(details);
   }
   if (response_body.usage) {
     result.usage = TokenUsage{

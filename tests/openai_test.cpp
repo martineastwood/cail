@@ -6,6 +6,39 @@
 
 namespace test {
 
+void test_middleware_chain() {
+  auto transport = std::make_unique<StubTransport>();
+  auto* stub = transport.get();
+  cail::detail::openai::Client client({.api_key = "test-key", .model = "test-model"},
+                                      std::move(transport));
+  std::vector<std::string> calls;
+  const auto middleware = [&](std::string name) {
+    return cail::GenerationMiddleware{
+        .before_request =
+            [&, name](cail::HttpRequest& request, const cail::MiddlewareContext& context) {
+              calls.push_back(name + ":before:" + std::to_string(context.step));
+              request.headers.push_back({.name = "x-middleware", .value = name});
+            },
+        .after_response =
+            [&, name](const cail::HttpResponse& response, const cail::MiddlewareContext& context) {
+              calls.push_back(name + ":after:" + std::to_string(context.step) + ":" +
+                              std::to_string(response.status_code));
+            },
+    };
+  };
+  const auto response = client.generate(cail::GenerationRequest{
+      .messages = {cail::Message{.content = {cail::TextPart{.text = "hello"}}}},
+      .middleware = {middleware("trace"), middleware("metrics")},
+      .step = 3,
+  });
+  check(response && calls == std::vector<std::string>{"trace:before:3", "metrics:before:3",
+                                                      "trace:after:3:200", "metrics:after:3:200"},
+        "middleware runs each HTTP phase in registration order");
+  check(stub->request.headers[stub->request.headers.size() - 2].value == "trace" &&
+            stub->request.headers.back().value == "metrics",
+        "middleware composes request mutations");
+}
+
 void test_openai_strict_optional_schemas() {
   auto transport = std::make_unique<StubTransport>();
   auto* stub = transport.get();
@@ -209,6 +242,7 @@ void test_image_content() {
 } // namespace test
 
 int main() {
+  test::test_middleware_chain();
   test::test_openai_strict_optional_schemas();
   test::test_openai_reasoning_summary();
   test::test_streaming_across_chunk_boundaries();

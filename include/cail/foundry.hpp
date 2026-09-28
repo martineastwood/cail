@@ -37,7 +37,7 @@ public:
   explicit FoundryProvider(FoundrySettings settings = {}) : settings_(std::move(settings)) {}
 
   [[nodiscard]] LanguageModel operator()(FoundryDeployment deployment) const {
-    return (*this)(std::move(deployment), std::make_unique<detail::GlazeHttpTransport>());
+    return (*this)(std::move(deployment), make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(FoundryDeployment deployment,

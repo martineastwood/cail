@@ -219,9 +219,10 @@ int main(int argc, char** argv) {
   const auto gemini_call = gemini.generate(gemini_tool_request);
   check(gemini_call && gemini_call->tool_calls.size() == 1 &&
             gemini_call->tool_calls.front().id == "call_1" &&
-            gemini_call->tool_calls.front().provider_options &&
-            gemini_call->tool_calls.front().provider_options->find("signature") !=
-                std::string::npos &&
+            gemini_call->tool_calls.front().provider_options.contains("thought_signature") &&
+            gemini_call->tool_calls.front()
+                    .provider_options.at("thought_signature")
+                    .get<std::string>() == "signature" &&
             gemini_call->tool_calls.front().name == "search",
         "Gemini function call and thought signature");
   cail::detail::gemini::Client validating_gemini(
@@ -239,7 +240,7 @@ int main(int argc, char** argv) {
                                 .id = "call_1",
                                 .name = "search",
                                 .arguments = R"({"q":"x"})",
-                                .provider_options = R"({"thought_signature":"signature"})"}}},
+                                .provider_options = {{"thought_signature", "signature"}}}}},
               cail::Message{.role = cail::MessageRole::tool,
                             .content = {cail::TextPart{.text = R"({"answer":"yes"})"}},
                             .tool_call_id = "call_1"},

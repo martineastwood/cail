@@ -34,7 +34,7 @@ public:
       : settings_(std::move(settings)) {}
 
   [[nodiscard]] LanguageModel operator()(std::string model_id) const {
-    return (*this)(std::move(model_id), std::make_unique<GlazeHttpTransport>());
+    return (*this)(std::move(model_id), make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,

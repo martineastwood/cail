@@ -11,6 +11,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -57,6 +58,8 @@ private:
 
 struct ToolLoopOptions {
   std::size_t max_rounds{8};
+  std::function<bool(const GenerationResponse&, const MiddlewareContext&)> stop_when;
+  std::stop_token stop;
 };
 
 namespace detail {
@@ -137,24 +140,54 @@ template <typename Input, typename Output, typename Handler>
                                        std::forward<Handler>(handler)};
 }
 
-template <typename Client>
-[[nodiscard]] Result<GenerationResponse>
-run_tool_loop(const Client& client, GenerationRequest request, const std::vector<Tool>& tools,
-              ToolLoopOptions options = {}) {
+namespace detail {
+
+template <typename Send>
+[[nodiscard]] Result<GenerationResponse> run_tool_loop(GenerationRequest request,
+                                                       const std::vector<Tool>& tools,
+                                                       ToolLoopOptions options, Send&& send) {
   request.tools.clear();
   request.tools.reserve(tools.size());
   for (const auto& tool : tools) {
     request.tools.push_back(tool.definition());
   }
 
-  auto response = client.generate(request);
+  if (options.stop.stop_requested()) {
+    return std::unexpected(generation_cancelled_error());
+  }
+  auto response = send(request);
+  if (auto middleware = detail::run_after_step(request, response); !middleware) {
+    return std::unexpected(middleware.error());
+  }
   if (!response) {
     return std::unexpected(response.error());
   }
 
   std::vector<ToolResult> tool_results;
   std::size_t round = 0;
-  while (!response->tool_calls.empty()) {
+  while (true) {
+    if (options.stop.stop_requested()) {
+      return std::unexpected(generation_cancelled_error());
+    }
+    if (options.stop_when) {
+      try {
+        if (options.stop_when(*response, {.step = request.step})) {
+          response->tool_results = std::move(tool_results);
+          return response;
+        }
+      } catch (const std::exception& error) {
+        return std::unexpected(Error{
+            .code = ErrorCode::invalid_configuration,
+            .message = std::string{"The tool-loop stop condition failed: "} + error.what(),
+        });
+      } catch (...) {
+        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                     .message = "The tool-loop stop condition failed."});
+      }
+    }
+    if (response->tool_calls.empty()) {
+      break;
+    }
     if (round >= options.max_rounds) {
       return std::unexpected(Error{
           .code = ErrorCode::tool_loop_limit,
@@ -169,8 +202,8 @@ run_tool_loop(const Client& client, GenerationRequest request, const std::vector
         .max_output_tokens = request.max_output_tokens,
         .stream_usage = request.stream_usage,
         .provider_options = request.provider_options,
-        .before_request = request.before_request,
-        .after_response = request.after_response,
+        .middleware = request.middleware,
+        .step = round + 1,
     };
     if (!response->continuation_token) {
       follow_up.messages = request.messages;
@@ -180,6 +213,7 @@ run_tool_loop(const Client& client, GenerationRequest request, const std::vector
                          ? std::vector<ContentPart>{}
                          : std::vector<ContentPart>{TextPart{.text = response->text}},
           .tool_calls = response->tool_calls,
+          .provider_options = response->provider_options,
       });
     }
     for (const auto& call : response->tool_calls) {
@@ -211,7 +245,10 @@ run_tool_loop(const Client& client, GenerationRequest request, const std::vector
 
     ++round;
     request = follow_up;
-    response = client.generate(follow_up);
+    response = send(follow_up);
+    if (auto middleware = detail::run_after_step(follow_up, response); !middleware) {
+      return std::unexpected(middleware.error());
+    }
     if (!response) {
       return std::unexpected(response.error());
     }
@@ -219,6 +256,26 @@ run_tool_loop(const Client& client, GenerationRequest request, const std::vector
 
   response->tool_results = std::move(tool_results);
   return response;
+}
+
+} // namespace detail
+
+template <typename Client>
+[[nodiscard]] Result<GenerationResponse>
+run_tool_loop(const Client& client, GenerationRequest request, const std::vector<Tool>& tools,
+              ToolLoopOptions options = {}) {
+  return detail::run_tool_loop(
+      std::move(request), tools, options,
+      [&](const GenerationRequest& step) { return client.generate(step); });
+}
+
+template <typename Client>
+[[nodiscard]] Result<GenerationResponse>
+stream_tool_loop(const Client& client, GenerationRequest request, const std::vector<Tool>& tools,
+                 const StreamHandler& on_event, ToolLoopOptions options = {}) {
+  return detail::run_tool_loop(
+      std::move(request), tools, options,
+      [&](const GenerationRequest& step) { return client.stream(step, on_event, options.stop); });
 }
 
 } // namespace cail

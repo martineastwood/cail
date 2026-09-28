@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cail/agent.hpp>
 #include <cail/anthropic.hpp>
 #include <cail/chat_completions.hpp>
 #include <cail/embedding_model.hpp>

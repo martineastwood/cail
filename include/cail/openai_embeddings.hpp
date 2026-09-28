@@ -51,8 +51,7 @@ class EmbeddingClient {
 public:
   EmbeddingClient(std::string api_key, std::string model, std::string base_url,
                   std::optional<std::size_t> dimensions = std::nullopt,
-                  std::unique_ptr<HttpTransport> transport =
-                      std::make_unique<cail::detail::GlazeHttpTransport>())
+                  std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
       : api_key_(std::move(api_key)), model_(std::move(model)), base_url_(std::move(base_url)),
         dimensions_(dimensions), transport_(std::move(transport)) {}
 

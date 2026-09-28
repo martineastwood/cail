@@ -21,35 +21,12 @@ public:
   GlazeHttpTransport() { client_.set_graceful_ssl_shutdown(false); }
 
   [[nodiscard]] Result<HttpResponse> send(const HttpRequest& request) override {
-    glz::http_headers headers;
-    for (const auto& header : request.headers) {
-      headers.add(header.name, header.value);
+    std::string body;
+    auto response = stream(request, [&](std::string_view data) { body.append(data); }, {});
+    if (response && response->status_code < 400) {
+      response->body = std::move(body);
     }
-
-    std::expected<glz::response, std::error_code> response = [&] {
-      if (request.method == "POST") {
-        return client_.post(request.url, request.body, headers);
-      }
-      return std::expected<glz::response, std::error_code>{
-          std::unexpected(std::make_error_code(std::errc::operation_not_supported))};
-    }();
-
-    if (!response) {
-      return std::unexpected(Error{
-          .code = ErrorCode::transport,
-          .message = response.error().message(),
-      });
-    }
-
-    HttpResponse result{
-        .status_code = response->status_code,
-        .body = std::move(response->response_body),
-    };
-    result.headers.reserve(response->response_headers.size());
-    for (const auto& [name, value] : response->response_headers) {
-      result.headers.push_back(HttpHeader{.name = name, .value = value});
-    }
-    return result;
+    return response;
   }
 
   [[nodiscard]] Result<HttpResponse> stream(const HttpRequest& request,
@@ -77,6 +54,7 @@ public:
     glz::stream_request_params_v2 params{
         .method = request.method,
         .url = request.url,
+        .timeout = request.timeout,
         .strategy = glz::stream_read_strategy::immediate_delivery,
         .body = request.body,
         .headers = std::move(headers),
@@ -152,3 +130,15 @@ private:
 };
 
 } // namespace cail::detail
+
+namespace cail {
+
+[[nodiscard]] inline std::unique_ptr<HttpTransport>
+make_default_http_transport(TransportOptions options = {}) {
+  return std::make_unique<RetryingHttpTransport>(
+      std::make_unique<TimeoutHttpTransport>(std::make_unique<detail::GlazeHttpTransport>(),
+                                             options.timeout),
+      options.retry);
+}
+
+} // namespace cail

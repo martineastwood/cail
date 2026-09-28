@@ -48,9 +48,6 @@ struct FunctionCall {
   glz::raw_json args;
   std::optional<std::string> id;
 };
-struct ToolOptions {
-  std::optional<std::string> thought_signature;
-};
 struct CallPart {
   FunctionCall functionCall;
   std::optional<std::string> thoughtSignature;
@@ -131,26 +128,23 @@ struct ErrorBody {
 
 [[nodiscard]] inline Result<std::optional<std::string>>
 thought_signature(const cail::ToolCall& call) {
-  if (!call.provider_options) {
+  if (!call.provider_options.contains("thought_signature")) {
     return std::optional<std::string>{};
   }
-  auto options = from_json<ToolOptions>(*call.provider_options);
-  if (!options) {
-    return std::unexpected(options.error());
+  const auto* signature = call.provider_options.at("thought_signature").get_if<std::string>();
+  if (!signature) {
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message = "Gemini thought_signature must be a string."});
   }
-  return options->thought_signature;
+  return *signature;
 }
 
-[[nodiscard]] inline Result<std::optional<std::string>>
+[[nodiscard]] inline ProviderOptions
 encode_tool_options(const std::optional<std::string>& thought_signature) {
   if (!thought_signature) {
-    return std::optional<std::string>{};
+    return {};
   }
-  auto encoded = to_json(ToolOptions{.thought_signature = thought_signature});
-  if (!encoded) {
-    return std::unexpected(encoded.error());
-  }
-  return std::optional<std::string>{std::move(*encoded)};
+  return {{"thought_signature", *thought_signature}};
 }
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request) {
@@ -352,13 +346,11 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
                                      .message = "Gemini returned a function call without an ID."});
       }
       auto options = encode_tool_options(part.thoughtSignature);
-      if (!options)
-        return std::unexpected(options.error());
       cail::ToolCall mapped{
           .id = *call.id,
           .name = call.name,
           .arguments = call.args.str,
-          .provider_options = std::move(*options),
+          .provider_options = std::move(options),
       };
       if (on_event)
         on_event(
@@ -371,8 +363,8 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
 
 class Client {
 public:
-  explicit Client(Config config, std::unique_ptr<HttpTransport> transport =
-                                     std::make_unique<cail::detail::GlazeHttpTransport>())
+  explicit Client(Config config,
+                  std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
       : config_(std::move(config)), transport_(std::move(transport)) {}
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
@@ -399,12 +391,8 @@ private:
     auto json = to_json(*body);
     if (!json)
       return std::unexpected(json.error());
-    if (request.provider_options) {
-      glz::generic options;
-      if (const auto error = glz::read_json(options, *request.provider_options); error)
-        return std::unexpected(
-            Error{.code = ErrorCode::invalid_configuration,
-                  .message = glz::format_error(error, *request.provider_options)});
+    if (!request.provider_options.empty()) {
+      glz::generic options = request.provider_options;
       if (options.is_object() && options.contains("reasoning_effort") &&
           options["reasoning_effort"].is_string()) {
         auto effort = options["reasoning_effort"].get<std::string>();
@@ -429,13 +417,12 @@ private:
       }
       if (body->generationConfig && options.is_object() && options.contains("generationConfig")) {
         auto base = to_json(*body->generationConfig);
-        auto override_config = options["generationConfig"].dump();
         if (!base)
           return std::unexpected(base.error());
+        const auto* override_config = options["generationConfig"].get_if<glz::generic::object_t>();
         if (!override_config)
-          return std::unexpected(
-              Error{.code = ErrorCode::invalid_configuration,
-                    .message = "Could not encode Gemini generation configuration."});
+          return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                       .message = "generationConfig must be a JSON object."});
         auto merged_config = merge_json_objects(*base, *override_config);
         if (!merged_config)
           return std::unexpected(merged_config.error());
@@ -443,11 +430,7 @@ private:
           return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                        .message = glz::format_error(error, *merged_config)});
       }
-      auto encoded_options = options.dump();
-      if (!encoded_options)
-        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                     .message = "Could not encode Gemini provider options."});
-      auto merged = merge_json_objects(*json, *encoded_options);
+      auto merged = merge_json_objects(*json, options.get<glz::generic::object_t>());
       if (!merged)
         return std::unexpected(merged.error());
       json = std::move(*merged);
@@ -467,17 +450,8 @@ private:
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
     cail::detail::append_session_header(http.headers, config_.request_session_header,
                                         request.session_id);
-    if (request.before_request) {
-      try {
-        request.before_request(http);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::invalid_configuration,
-                  .message = std::string{"The before-request callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                     .message = "The before-request callback failed."});
-      }
+    if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
+      return std::unexpected(middleware.error());
     }
     cail::detail::SseParser parser;
     GenerationResponse result;
@@ -505,17 +479,8 @@ private:
                 : transport_->send(http);
     if (!response)
       return std::unexpected(response.error());
-    if (request.after_response) {
-      try {
-        request.after_response(*response);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::provider_response,
-                  .message = std::string{"The after-response callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                     .message = "The after-response callback failed."});
-      }
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+      return std::unexpected(middleware.error());
     }
 
     if (stop.stop_requested())
@@ -571,7 +536,7 @@ class GeminiProvider {
 public:
   explicit GeminiProvider(GeminiSettings settings = {}) : settings_(std::move(settings)) {}
   [[nodiscard]] LanguageModel operator()(std::string model_id) const {
-    return (*this)(std::move(model_id), std::make_unique<detail::GlazeHttpTransport>());
+    return (*this)(std::move(model_id), make_default_http_transport());
   }
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,

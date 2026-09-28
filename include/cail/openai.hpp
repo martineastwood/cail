@@ -37,14 +37,9 @@ struct Config {
   bool prompt_cache_key = false;
 };
 
-struct MessageOptions {
-  std::vector<glz::raw_json> reasoning_details;
-};
-
 class Client {
 public:
-  explicit Client(Config config)
-      : Client(std::move(config), std::make_unique<cail::detail::GlazeHttpTransport>()) {}
+  explicit Client(Config config) : Client(std::move(config), cail::make_default_http_transport()) {}
 
   Client(Config config, std::unique_ptr<HttpTransport> transport)
       : config_(std::move(config)), transport_(std::move(transport)) {}
@@ -193,25 +188,28 @@ private:
         });
       }
 
-      if (message.role == MessageRole::assistant && message.provider_options) {
-        MessageOptions options;
-        if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(
-                options, *message.provider_options);
-            error) {
-          return std::unexpected(Error{
-              .code = ErrorCode::invalid_configuration,
-              .message = "Assistant provider options must be a JSON object: " +
-                         glz::format_error(error, *message.provider_options),
-              .byte_offset = error.count,
-          });
+      if (message.role == MessageRole::assistant &&
+          message.provider_options.contains("reasoning_details")) {
+        const auto* details =
+            message.provider_options.at("reasoning_details").get_if<glz::generic::array_t>();
+        if (!details) {
+          return std::unexpected(
+              Error{.code = ErrorCode::invalid_configuration,
+                    .message = "Assistant reasoning_details must be a JSON array."});
         }
-        for (const auto& raw_item : options.reasoning_details) {
-          auto item = wire::decode_response_item(raw_item, 0);
+        for (const auto& value : *details) {
+          auto raw_item = value.dump();
+          if (!raw_item) {
+            return std::unexpected(Error{.code = ErrorCode::json_serialization,
+                                         .message = "Could not encode reasoning details."});
+          }
+          glz::raw_json raw{std::move(*raw_item)};
+          auto item = wire::decode_response_item(raw, 0);
           if (!item) {
             return std::unexpected(item.error());
           }
           if (item->type == "reasoning" && item->encrypted_content) {
-            body.input.emplace_back(raw_item);
+            body.input.emplace_back(std::move(raw));
           }
         }
       }
@@ -313,23 +311,16 @@ private:
     if (config_.prompt_cache_key && !request.session_id.empty()) {
       glz::generic cache_key = glz::generic::object_t{};
       cache_key["prompt_cache_key"] = request.session_id;
-      auto dumped = cache_key.dump();
-      if (!dumped) {
-        return std::unexpected(Error{
-            .code = ErrorCode::json_serialization,
-            .message = "Could not encode the OpenAI prompt cache key.",
-        });
-      }
-      auto merged = merge_json_objects(*encoded, *dumped);
+      auto merged = merge_json_objects(*encoded, cache_key.get<glz::generic::object_t>());
       if (!merged) {
         return std::unexpected(merged.error());
       }
       encoded = std::move(*merged);
     }
-    if (request.provider_options) {
-      auto options = *request.provider_options;
-      glz::generic parsed;
-      if (!glz::read_json(parsed, options) && parsed.is_object()) {
+    if (!request.provider_options.empty()) {
+      auto options = request.provider_options;
+      glz::generic parsed = options;
+      {
         auto& object = parsed.get<glz::generic::object_t>();
         if (const auto it = object.find("reasoning_effort");
             it != object.end() && it->second.is_string()) {
@@ -339,12 +330,9 @@ private:
             parsed["reasoning"] = glz::generic::object_t{};
           }
           parsed["reasoning"]["effort"] = effort;
-          if (auto dumped = parsed.dump()) {
-            options = std::move(*dumped);
-          }
         }
       }
-      auto merged = merge_json_objects(*encoded, options);
+      auto merged = merge_json_objects(*encoded, parsed.get<glz::generic::object_t>());
       if (!merged) {
         return std::unexpected(merged.error());
       }
@@ -372,17 +360,8 @@ private:
     };
     cail::detail::append_session_header(http_request.headers, config_.request_session_header,
                                         request.session_id);
-    if (request.before_request) {
-      try {
-        request.before_request(http_request);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::invalid_configuration,
-                  .message = std::string{"The before-request callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                     .message = "The before-request callback failed."});
-      }
+    if (auto middleware = cail::detail::run_before_request(request, http_request); !middleware) {
+      return std::unexpected(middleware.error());
     }
 
     cail::detail::SseParser sse_parser;
@@ -450,17 +429,8 @@ private:
     if (!http_response) {
       return std::unexpected(http_response.error());
     }
-    if (request.after_response) {
-      try {
-        request.after_response(*http_response);
-      } catch (const std::exception& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::provider_response,
-                  .message = std::string{"The after-response callback failed: "} + error.what()});
-      } catch (...) {
-        return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                     .message = "The after-response callback failed."});
-      }
+    if (auto middleware = cail::detail::run_after_response(request, *http_response); !middleware) {
+      return std::unexpected(middleware.error());
     }
     const auto with_context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), *http_response);

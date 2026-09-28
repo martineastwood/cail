@@ -43,7 +43,7 @@ template <typename T> [[nodiscard]] Result<T> from_json(std::string_view json) {
 }
 
 [[nodiscard]] inline Result<std::string> merge_json_objects(std::string_view target_json,
-                                                            std::string_view fields_json) {
+                                                            const glz::generic::object_t& fields) {
   glz::generic target;
   if (const auto error = glz::read_json(target, target_json); error || !target.is_object()) {
     return std::unexpected(Error{
@@ -51,14 +51,7 @@ template <typename T> [[nodiscard]] Result<T> from_json(std::string_view json) {
         .message = "The target value must be a JSON object.",
     });
   }
-  glz::generic fields;
-  if (const auto error = glz::read_json(fields, fields_json); error || !fields.is_object()) {
-    return std::unexpected(Error{
-        .code = ErrorCode::json_deserialization,
-        .message = "Provider options must be a JSON object.",
-    });
-  }
-  for (const auto& [key, value] : fields.get<glz::generic::object_t>()) {
+  for (const auto& [key, value] : fields) {
     target[key] = value;
   }
   auto encoded = to_json(target);
