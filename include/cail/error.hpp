@@ -22,6 +22,7 @@ enum class ErrorCode {
   tool_execution,
   tool_not_found,
   tool_loop_limit,
+  memory,
 };
 
 struct Error {

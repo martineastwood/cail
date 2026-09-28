@@ -27,8 +27,9 @@ Configure once per build directory, then build and run what you need:
 ```
 
 Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`,
-and `cail_opencode`. `cail_local_http` starts a local Python server, and
-`cail_install_smoke` builds a consumer against the installed package.
+`cail_memory`, and `cail_opencode`. `cail_local_http` starts a local Python
+server, and `cail_install_smoke` builds a consumer against the installed
+package.
 
 Run `./dev test -N` to list the available suites.
 

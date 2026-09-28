@@ -22,6 +22,7 @@ export default defineConfig({
 				{ label: 'Structured outputs', slug: 'guides/structured-output' },
 				{ label: 'Tools', slug: 'guides/tools' },
 				{ label: 'Agent', slug: 'guides/agent' },
+				{ label: 'Memory', slug: 'guides/memory' },
 				{ label: 'Streaming', slug: 'guides/streaming' },
 				{ label: 'Embeddings', slug: 'guides/embeddings' },
 				{ label: 'Providers', slug: 'guides/providers' },

@@ -110,5 +110,6 @@ optionality.
 
 - [Providers](/guides/providers/) for Anthropic, Gemini, OpenRouter, and local models
 - [Agent](/guides/agent/) to bundle a model, instructions, and tools
+- [Memory](/guides/memory/) to make an agent remember earlier turns
 - [Tools](/guides/tools/) to let the model call your functions
 - [Streaming](/guides/streaming/) for event types and cancellation

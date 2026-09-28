@@ -15,6 +15,7 @@
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
 #include <cail/local.hpp>
+#include <cail/memory.hpp>
 #include <cail/mistral.hpp>
 #include <cail/ollama_cloud.hpp>
 #include <cail/openai.hpp>

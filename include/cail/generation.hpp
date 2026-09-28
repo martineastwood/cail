@@ -151,6 +151,9 @@ struct GenerationResponse {
   std::optional<TokenUsage> usage;
   std::vector<ToolCall> tool_calls;
   std::vector<ToolResult> tool_results;
+  // Messages generated during this call, including every tool round: the
+  // assistant messages and tool-result messages that extend a conversation.
+  std::vector<Message> turn;
   std::optional<std::string> continuation_token;
   ProviderOptions provider_options;
 };

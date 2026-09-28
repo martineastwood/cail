@@ -236,8 +236,8 @@ An agent runs the same bounded tool loop as `generate_text`. It sends its instru
 the first system message, executes tool calls, returns their results to the model, and
 stops when the model answers or the round limit is reached.
 
-Agents are stateless. Pass a `GenerationRequest` when you need conversation history or
-per-request options:
+Without a memory backend, an agent is stateless. Pass a `GenerationRequest` when you need
+conversation history or per-request options:
 
 ```cpp
 auto result = weather_agent.generate(cail::GenerationRequest{
@@ -246,9 +246,26 @@ auto result = weather_agent.generate(cail::GenerationRequest{
 });
 ```
 
-Your application owns and persists `history`. CAIL does not provide agent memory,
-retrieval, planning, delegation, or a separate agent runtime. Use `LanguageModel` directly
-for a hand-written workflow whose steps are known in advance.
+Your application owns and persists `history`. For agents that remember their
+conversation, attach a memory backend instead:
+
+```cpp
+cail::Agent agent({
+    .model = cail::openai("gpt-6-luna"),
+    .instructions = "You are a concise research assistant.",
+    .memory = std::make_shared<cail::FileConversationMemory>("conversations"),
+    .conversation_id = "user-42",
+});
+
+auto reply = agent.generate("What is my name?");
+```
+
+A memory agent loads the stored history before each prompt and appends the new
+turn, including tool calls and their results, after it succeeds. Set
+`keep_last_messages` on the options to bound what is sent. See
+[Memory](https://martineastwood.github.io/cail/guides/memory/) for backends,
+conversation ids, and storing history in your own store. Use `LanguageModel`
+directly for a hand-written workflow whose steps are known in advance.
 
 ## Streaming
 
@@ -751,4 +768,5 @@ so it needs no key.
 - [Quickstart](https://martineastwood.github.io/cail/guides/quickstart/) for a guided first request
 - [Providers](https://martineastwood.github.io/cail/guides/providers/) for provider setup and capabilities
 - [Agent](https://martineastwood.github.io/cail/guides/agent/) to bundle a model, instructions, and tools
+- [Memory](https://martineastwood.github.io/cail/guides/memory/) to give an agent conversation memory
 - [Advanced usage](https://martineastwood.github.io/cail/guides/advanced/) for middleware, options, and images

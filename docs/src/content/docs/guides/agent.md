@@ -37,7 +37,7 @@ cmake --build build --target cail_openai_agent
 
 ## Configure the agent
 
-`AgentConfig` takes three fields:
+`AgentConfig` takes five fields:
 
 - `model`: any CAIL model, such as `cail::openai("gpt-6-luna")` or a model from
   `create_local`. See [Providers](/guides/providers/).
@@ -45,6 +45,9 @@ cmake --build build --target cail_openai_agent
   system message. Leave it empty to send none.
 - `tools`: the tools offered on every run. See [Tools](/guides/tools/) for
   creating typed handlers with `cail::tool`.
+- `memory`: an optional conversation history backend. See
+  [Memory](/guides/memory/).
+- `conversation_id`: the default conversation id used with `memory`.
 
 ## Add tools
 
@@ -92,6 +95,9 @@ cail::GenerationRequest request{
 };
 auto response = agent.generate(request);
 ```
+
+Passing a request also bypasses agent memory: nothing is loaded and nothing is
+stored. See [Memory](/guides/memory/) to keep history for prompt calls.
 
 ## Tune the loop
 
@@ -145,4 +151,5 @@ run `cail::run_tool_loop` and `cail::stream_tool_loop` directly as shown in
 ## Next steps
 
 - [Tools](/guides/tools/) for typed tool handlers and the loop in detail
+- [Memory](/guides/memory/) to give an agent conversation history
 - [Providers](/guides/providers/) to pick a model for the agent

@@ -60,6 +60,11 @@ struct ToolLoopOptions {
   std::size_t max_rounds{8};
   std::function<bool(const GenerationResponse&, const MiddlewareContext&)> stop_when;
   std::stop_token stop;
+  // Conversation id for agent memory; overrides the agent's default.
+  std::string conversation_id;
+  // Send at most this many trailing history messages (leading system and
+  // developer messages are always kept). Zero sends the full history.
+  std::size_t keep_last_messages{0};
 };
 
 namespace detail {
@@ -169,6 +174,17 @@ template <typename Send>
   }
 
   std::vector<ToolResult> tool_results;
+  std::vector<Message> turn;
+  auto assistant_message = [](const GenerationResponse& response) {
+    return Message{
+        .role = MessageRole::assistant,
+        .content = response.text.empty()
+                       ? std::vector<ContentPart>{}
+                       : std::vector<ContentPart>{TextPart{.text = response.text}},
+        .tool_calls = response.tool_calls,
+        .provider_options = response.provider_options,
+    };
+  };
   std::size_t round = 0;
   while (true) {
     if (options.stop.stop_requested()) {
@@ -177,8 +193,7 @@ template <typename Send>
     if (options.stop_when) {
       try {
         if (options.stop_when(*response, {.step = request.step})) {
-          response->tool_results = std::move(tool_results);
-          return response;
+          break;
         }
       } catch (const std::exception& error) {
         return std::unexpected(Error{
@@ -210,17 +225,12 @@ template <typename Send>
         .middleware = request.middleware,
         .step = round + 1,
     };
+    Message assistant = assistant_message(*response);
     if (!response->continuation_token) {
       follow_up.messages = request.messages;
-      follow_up.messages.push_back(Message{
-          .role = MessageRole::assistant,
-          .content = response->text.empty()
-                         ? std::vector<ContentPart>{}
-                         : std::vector<ContentPart>{TextPart{.text = response->text}},
-          .tool_calls = response->tool_calls,
-          .provider_options = response->provider_options,
-      });
+      follow_up.messages.push_back(assistant);
     }
+    turn.push_back(std::move(assistant));
     for (const auto& call : response->tool_calls) {
       const auto tool = std::ranges::find_if(tools, [&call](const auto& candidate) {
         return candidate.definition().name == call.name;
@@ -241,11 +251,13 @@ template <typename Send>
           .name = call.name,
           .output = *output,
       });
-      follow_up.messages.push_back(Message{
+      Message tool_message{
           .role = MessageRole::tool,
           .content = {TextPart{.text = std::move(*output)}},
           .tool_call_id = call.id,
-      });
+      };
+      follow_up.messages.push_back(tool_message);
+      turn.push_back(std::move(tool_message));
     }
 
     ++round;
@@ -256,7 +268,9 @@ template <typename Send>
     }
   }
 
+  turn.push_back(assistant_message(*response));
   response->tool_results = std::move(tool_results);
+  response->turn = std::move(turn);
   return response;
 }
 
