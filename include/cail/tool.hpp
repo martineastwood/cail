@@ -152,13 +152,18 @@ template <typename Send>
     request.tools.push_back(tool.definition());
   }
 
+  const auto send_step = [&](const GenerationRequest& step) -> Result<GenerationResponse> {
+    auto response = send(step);
+    if (auto middleware = detail::run_after_step(step, response); !middleware) {
+      return std::unexpected(middleware.error());
+    }
+    return response;
+  };
+
   if (options.stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
   }
-  auto response = send(request);
-  if (auto middleware = detail::run_after_step(request, response); !middleware) {
-    return std::unexpected(middleware.error());
-  }
+  auto response = send_step(request);
   if (!response) {
     return std::unexpected(response.error());
   }
@@ -245,10 +250,7 @@ template <typename Send>
 
     ++round;
     request = follow_up;
-    response = send(follow_up);
-    if (auto middleware = detail::run_after_step(follow_up, response); !middleware) {
-      return std::unexpected(middleware.error());
-    }
+    response = send_step(follow_up);
     if (!response) {
       return std::unexpected(response.error());
     }

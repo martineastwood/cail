@@ -50,20 +50,17 @@ struct ToolDefinition {
   std::string name;
   std::string description;
   Schema parameters;
-  // JSON object with provider-specific fields for the tool definition.
   ProviderOptions provider_options;
 };
 
 struct TextPart {
   std::string text;
-  // JSON object with provider-specific fields for this content part.
   ProviderOptions provider_options;
 };
 
 struct ImagePart {
   std::string bytes;
   std::string mime_type;
-  // JSON object with provider-specific fields for this content part.
   ProviderOptions provider_options;
 };
 
@@ -83,7 +80,6 @@ struct Message {
   std::vector<ContentPart> content;
   std::string tool_call_id;
   std::vector<ToolCall> tool_calls;
-  // JSON object with provider-specific fields for this message.
   ProviderOptions provider_options;
 };
 
@@ -101,17 +97,20 @@ struct GenerationRequest {
   std::optional<std::string> continuation_token;
   // Stable caller-owned conversation ID for providers that route by session.
   std::string session_id;
-  // Optional per-request cap on generated tokens.
   std::optional<std::size_t> max_output_tokens;
-  // Request usage details in streamed responses when the provider supports it.
   std::optional<bool> stream_usage;
-  // JSON object with provider-specific fields for the generation request.
   ProviderOptions provider_options;
   std::vector<GenerationMiddleware> middleware;
   std::size_t step{};
 };
 
 namespace detail {
+
+[[nodiscard]] inline GenerationRequest user_prompt_request(std::string_view prompt) {
+  return GenerationRequest{
+      .messages = {Message{.content = {TextPart{.text = std::string{prompt}}}}},
+  };
+}
 
 [[nodiscard]] inline Result<void> validate_max_output_tokens(const GenerationRequest& request) {
   if (request.max_output_tokens && *request.max_output_tokens == 0) {
@@ -153,7 +152,6 @@ struct GenerationResponse {
   std::vector<ToolCall> tool_calls;
   std::vector<ToolResult> tool_results;
   std::optional<std::string> continuation_token;
-  // JSON object with provider-specific response fields for history round-trips.
   ProviderOptions provider_options;
 };
 

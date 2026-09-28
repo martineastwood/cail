@@ -105,8 +105,12 @@ public:
     switch (api_family) {
     case OpenCodeApiFamily::chat_completions: {
       auto client = std::make_shared<detail::chat_completions::Client>(
-          root + "/chat/completions", std::move(model_id), key, std::vector<HttpHeader>{},
-          std::move(transport), session_header);
+          ChatCompletionsSettings{
+              .endpoint = root + "/chat/completions",
+              .api_key = key,
+              .request_session_header = session_header,
+          },
+          std::move(model_id), std::move(transport));
       return detail::opencode::language_model_from(std::move(client), !key.empty(),
                                                    chat_completions_adapter_capabilities());
     }

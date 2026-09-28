@@ -9,15 +9,15 @@
 
 namespace cail {
 
-// What a CAIL provider adapter can encode, decode, and stream for its API.
-// This does not guarantee that the selected model accepts every feature.
+// Adapter wire capabilities. Does not guarantee the selected model accepts every feature.
+// `streaming` is derived from whether a stream function was provided.
 struct AdapterCapabilities {
-  bool streaming{};         // The adapter implements streaming for this API.
-  bool image_input{};       // The adapter can encode image parts into requests.
-  bool tools{};             // The adapter can send tool definitions and parse tool calls.
-  bool structured_output{}; // The adapter can send JSON Schema output constraints.
-  bool reasoning{};         // The adapter can parse reasoning fields or deltas.
-  bool continuation{};      // The adapter supports continuation tokens on this API.
+  bool streaming{};
+  bool image_input{};
+  bool tools{};
+  bool structured_output{};
+  bool reasoning{};
+  bool continuation{};
 };
 
 class LanguageModel {
@@ -70,12 +70,7 @@ public:
 
   [[nodiscard]] Result<GenerationResponse>
   stream(std::string_view prompt, const StreamHandler& on_event, std::stop_token stop = {}) const {
-    return stream(
-        GenerationRequest{
-            .messages = {Message{.role = MessageRole::user,
-                                 .content = {TextPart{.text = std::string{prompt}}}}},
-        },
-        on_event, stop);
+    return stream(detail::user_prompt_request(prompt), on_event, stop);
   }
 
 private:

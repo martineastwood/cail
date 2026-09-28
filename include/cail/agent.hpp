@@ -24,7 +24,7 @@ public:
 
   [[nodiscard]] Result<GenerationResponse> generate(std::string_view prompt,
                                                     ToolLoopOptions options = {}) const {
-    return generate(request(prompt), std::move(options));
+    return generate(detail::user_prompt_request(prompt), std::move(options));
   }
 
   [[nodiscard]] Result<GenerationResponse> generate(GenerationRequest request,
@@ -35,7 +35,7 @@ public:
   [[nodiscard]] Result<GenerationResponse> stream(std::string_view prompt,
                                                   const StreamHandler& on_event,
                                                   ToolLoopOptions options = {}) const {
-    return stream(request(prompt), on_event, std::move(options));
+    return stream(detail::user_prompt_request(prompt), on_event, std::move(options));
   }
 
   [[nodiscard]] Result<GenerationResponse> stream(GenerationRequest request,
@@ -46,12 +46,6 @@ public:
   }
 
 private:
-  [[nodiscard]] static GenerationRequest request(std::string_view prompt) {
-    return GenerationRequest{
-        .messages = {Message{.content = {TextPart{.text = std::string{prompt}}}}},
-    };
-  }
-
   [[nodiscard]] GenerationRequest prepare(GenerationRequest request) const {
     if (!instructions_.empty()) {
       request.messages.insert(

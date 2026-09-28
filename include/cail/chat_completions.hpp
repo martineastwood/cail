@@ -7,6 +7,7 @@
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
 #include <cail/generation.hpp>
+#include <cail/http.hpp>
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
 
@@ -21,6 +22,20 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+namespace cail {
+
+struct ChatCompletionsSettings {
+  std::string endpoint{"https://api.openai.com/v1/chat/completions"};
+  std::string api_key;
+  std::vector<HttpHeader> headers;
+  std::string request_session_header;
+  bool prompt_cache_key = false;
+  bool session_body = false;
+  bool retain_reasoning_content = true;
+};
+
+} // namespace cail
 
 namespace cail::detail::chat_completions {
 
@@ -96,9 +111,6 @@ struct ProviderError {
   std::optional<std::string> code;
   std::optional<std::string> type;
 };
-struct ErrorBody {
-  std::optional<ProviderError> error;
-};
 struct OutputToolCall {
   std::optional<std::size_t> index;
   std::optional<std::string> id;
@@ -127,20 +139,6 @@ struct ResponseBody {
   std::optional<ProviderError> error;
 };
 
-inline void append_reasoning_text(const glz::generic& value, std::string& text) {
-  if (const auto* string = value.get_if<std::string>()) {
-    text += *string;
-  } else if (const auto* array = value.get_if<glz::generic::array_t>()) {
-    for (const auto& item : *array)
-      append_reasoning_text(item, text);
-  } else if (value.is_object()) {
-    for (const auto* key : {"text", "content", "reasoning", "reasoning_content"}) {
-      if (value.contains(key))
-        append_reasoning_text(value[key], text);
-    }
-  }
-}
-
 struct ContentText {
   std::string text;
   std::string reasoning;
@@ -157,9 +155,14 @@ inline void append_content(const glz::generic& value, ContentText& output, bool 
       if (const auto* type = value["type"].get_if<std::string>())
         thinking |= *type == "thinking" || *type == "reasoning";
     }
-    for (const auto* key : {"thinking", "text", "content"}) {
-      if (value.contains(key))
-        append_content(value[key], output, thinking || std::string_view(key) == "thinking");
+    for (const auto* key : {"thinking", "text", "content", "reasoning", "reasoning_content"}) {
+      if (!value.contains(key))
+        continue;
+      const auto key_view = std::string_view(key);
+      const bool reasoning_key = key_view == "reasoning" || key_view == "reasoning_content";
+      if (reasoning_key && !thinking)
+        continue;
+      append_content(value[key], output, thinking || key_view == "thinking" || reasoning_key);
     }
   }
 }
@@ -201,11 +204,6 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
     options["reasoning_details"] = std::move(details);
   }
   return std::move(options.get<glz::generic::object_t>());
-}
-
-[[nodiscard]] inline ProviderOptions without_reasoning_content(ProviderOptions provider_options) {
-  provider_options.erase("reasoning_content");
-  return provider_options;
 }
 
 [[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body,
@@ -304,7 +302,7 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
       [&body, retain_reasoning_content](InputMessage item,
                                         ProviderOptions provider_options) -> Result<void> {
     if (!retain_reasoning_content) {
-      provider_options = without_reasoning_content(provider_options);
+      provider_options.erase("reasoning_content");
     }
     auto encoded = to_json(item);
     if (!encoded)
@@ -496,16 +494,10 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
 
 class Client {
 public:
-  Client(std::string endpoint, std::string model, std::string api_key,
-         std::vector<HttpHeader> headers,
-         std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport(),
-         std::string request_session_header = {}, bool prompt_cache_key = false,
-         bool session_body = false, bool retain_reasoning_content = true)
-      : endpoint_(std::move(endpoint)), model_(std::move(model)), api_key_(std::move(api_key)),
-        headers_(std::move(headers)), transport_(std::move(transport)),
-        request_session_header_(std::move(request_session_header)),
-        prompt_cache_key_(prompt_cache_key), session_body_(session_body),
-        retain_reasoning_content_(retain_reasoning_content) {}
+  Client(cail::ChatCompletionsSettings settings, std::string model,
+         std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
+      : settings_(std::move(settings)), model_(std::move(model)), transport_(std::move(transport)) {
+  }
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
     return run(request, {}, {});
@@ -521,21 +513,22 @@ private:
   run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
-    if (endpoint_.empty() || !transport_)
+    if (settings_.endpoint.empty() || !transport_)
       return std::unexpected(
           Error{.code = ErrorCode::invalid_configuration,
                 .message = "Chat Completions requires an endpoint and transport."});
-    auto body = encode(request, model_, static_cast<bool>(on_event), retain_reasoning_content_);
+    auto body =
+        encode(request, model_, static_cast<bool>(on_event), settings_.retain_reasoning_content);
     if (!body)
       return std::unexpected(body.error());
     auto encoded = to_json(*body);
     if (!encoded)
       return std::unexpected(encoded.error());
-    if (!request.session_id.empty() && (prompt_cache_key_ || session_body_)) {
+    if (!request.session_id.empty() && (settings_.prompt_cache_key || settings_.session_body)) {
       glz::generic routing = glz::generic::object_t{};
-      if (session_body_)
+      if (settings_.session_body)
         routing["session_id"] = request.session_id;
-      if (prompt_cache_key_)
+      if (settings_.prompt_cache_key)
         routing["prompt_cache_key"] = request.session_id;
       auto merged = merge_json_objects(*encoded, routing.get<glz::generic::object_t>());
       if (!merged)
@@ -548,13 +541,15 @@ private:
         return std::unexpected(merged.error());
       encoded = std::move(*merged);
     }
-    HttpRequest http{.url = endpoint_, .headers = headers_, .body = std::move(*encoded)};
+    HttpRequest http{
+        .url = settings_.endpoint, .headers = settings_.headers, .body = std::move(*encoded)};
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
-    if (!api_key_.empty())
-      http.headers.push_back({.name = "Authorization", .value = "Bearer " + api_key_});
+    if (!settings_.api_key.empty())
+      http.headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
     if (on_event)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
-    cail::detail::append_session_header(http.headers, request_session_header_, request.session_id);
+    cail::detail::append_session_header(http.headers, settings_.request_session_header,
+                                        request.session_id);
     if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
       return std::unexpected(middleware.error());
     }
@@ -637,7 +632,9 @@ private:
                                      .message = glz::format_error(error, detail.str)};
                 return;
               }
-              append_reasoning_text(value, reasoning_text);
+              ContentText extracted;
+              append_content(value, extracted, true);
+              reasoning_text += extracted.reasoning;
             }
             if (!reasoning_text.empty()) {
               on_event(StreamEvent{ReasoningDelta{.text = reasoning_text}});
@@ -689,15 +686,8 @@ private:
     const auto context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
     };
-    if (response->status_code < 200 || response->status_code >= 300) {
-      ErrorBody error_body;
-      const auto parsed =
-          glz::read<glz::opts{.error_on_unknown_keys = false}>(error_body, response->body);
-      return context(Error{
-          .code = ErrorCode::http_status,
-          .message = !parsed && error_body.error ? error_body.error->message : response->body,
-          .provider_code = !parsed && error_body.error ? error_body.error->code.value_or("") : "",
-          .provider_type = !parsed && error_body.error ? error_body.error->type.value_or("") : ""});
+    if (is_http_error_status(response->status_code)) {
+      return context(http_status_error_from_json_body(*response));
     }
     if (!on_event) {
       ResponseBody parsed;
@@ -706,7 +696,7 @@ private:
           error)
         return context(Error{.code = ErrorCode::provider_response,
                              .message = glz::format_error(error, response->body)});
-      auto result = decode(parsed, retain_reasoning_content_);
+      auto result = decode(parsed, settings_.retain_reasoning_content);
       return result ? result : context(result.error());
     }
     parser.finish(handle_event);
@@ -731,34 +721,18 @@ private:
       details_json = std::move(*encoded_details);
     }
     partial.provider_options =
-        round_trip_options(retain_reasoning_content_, echoed_reasoning, details_json);
+        round_trip_options(settings_.retain_reasoning_content, echoed_reasoning, details_json);
     return partial;
   }
 
-  std::string endpoint_;
+  cail::ChatCompletionsSettings settings_;
   std::string model_;
-  std::string api_key_;
-  std::vector<HttpHeader> headers_;
   std::unique_ptr<HttpTransport> transport_;
-  std::string request_session_header_;
-  bool prompt_cache_key_ = false;
-  bool session_body_ = false;
-  bool retain_reasoning_content_ = true;
 };
 
 } // namespace cail::detail::chat_completions
 
 namespace cail {
-
-struct ChatCompletionsSettings {
-  std::string endpoint{"https://api.openai.com/v1/chat/completions"};
-  std::string api_key;
-  std::vector<HttpHeader> headers;
-  std::string request_session_header;
-  bool prompt_cache_key = false;
-  bool session_body = false;
-  bool retain_reasoning_content = true;
-};
 
 [[nodiscard]] constexpr AdapterCapabilities chat_completions_adapter_capabilities() {
   return AdapterCapabilities{
@@ -779,10 +753,8 @@ public:
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,
                                          std::unique_ptr<HttpTransport> transport) const {
-    auto client = std::make_shared<detail::chat_completions::Client>(
-        settings_.endpoint, std::move(model_id), settings_.api_key, settings_.headers,
-        std::move(transport), settings_.request_session_header, settings_.prompt_cache_key,
-        settings_.session_body, settings_.retain_reasoning_content);
+    auto client = std::make_shared<detail::chat_completions::Client>(settings_, std::move(model_id),
+                                                                     std::move(transport));
     return LanguageModel{
         [client](const GenerationRequest& request) { return client->generate(request); },
         [client](const GenerationRequest& request, const StreamHandler& handler,

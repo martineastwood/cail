@@ -33,7 +33,7 @@ public:
 
   [[nodiscard]] LanguageModel operator()(std::string model_id,
                                          std::unique_ptr<HttpTransport> transport) const {
-    return create_chat_completions({
+    return ChatCompletionsProvider{ChatCompletionsSettings{
         .endpoint = settings_.endpoint,
         .api_key = env_or(settings_.api_key, Tag::env_var),
         .headers = settings_.headers,
@@ -41,7 +41,7 @@ public:
         .prompt_cache_key = settings_.prompt_cache_key,
         .session_body = settings_.session_body,
         .retain_reasoning_content = settings_.retain_reasoning_content,
-    })(std::move(model_id), std::move(transport));
+    }}(std::move(model_id), std::move(transport));
   }
 
 private:

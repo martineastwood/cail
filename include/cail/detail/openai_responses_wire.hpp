@@ -117,10 +117,6 @@ struct ResponseBody {
   std::optional<ProviderError> error;
 };
 
-struct ErrorBody {
-  std::optional<ProviderError> error;
-};
-
 struct StreamEventBody {
   std::string type;
   std::optional<std::string> delta;

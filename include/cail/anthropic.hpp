@@ -107,9 +107,6 @@ struct ProviderError {
   std::string type;
   std::string message;
 };
-struct ErrorBody {
-  std::optional<ProviderError> error;
-};
 struct StreamDelta {
   std::string type;
   std::optional<std::string> text;
@@ -637,14 +634,8 @@ private:
     const auto context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
     };
-    if (response->status_code < 200 || response->status_code >= 300) {
-      ErrorBody error_body;
-      const auto parsed =
-          glz::read<glz::opts{.error_on_unknown_keys = false}>(error_body, response->body);
-      return context(
-          Error{.code = ErrorCode::http_status,
-                .message = !parsed && error_body.error ? error_body.error->message : response->body,
-                .provider_type = !parsed && error_body.error ? error_body.error->type : ""});
+    if (is_http_error_status(response->status_code)) {
+      return context(http_status_error_from_json_body(*response));
     }
     if (!on_event) {
       ResponseBody parsed;

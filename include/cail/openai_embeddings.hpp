@@ -38,15 +38,6 @@ struct EmbeddingResponseBody {
   std::optional<EmbeddingUsage> usage;
 };
 
-struct EmbeddingErrorBody {
-  struct ProviderError {
-    std::string message;
-    std::optional<std::string> code;
-    std::optional<std::string> type;
-  };
-  std::optional<ProviderError> error;
-};
-
 class EmbeddingClient {
 public:
   EmbeddingClient(std::string api_key, std::string model, std::string base_url,
@@ -77,16 +68,8 @@ public:
     const auto context = [&](Error error) {
       return unexpected_with_http_context<EmbeddingBatch>(std::move(error), *response);
     };
-    if (response->status_code < 200 || response->status_code >= 300) {
-      EmbeddingErrorBody body;
-      const auto parsed =
-          glz::read<glz::opts{.error_on_unknown_keys = false}>(body, response->body);
-      return context(Error{
-          .code = ErrorCode::http_status,
-          .message = !parsed && body.error ? body.error->message : response->body,
-          .provider_code = !parsed && body.error ? body.error->code.value_or("") : "",
-          .provider_type = !parsed && body.error ? body.error->type.value_or("") : "",
-      });
+    if (is_http_error_status(response->status_code)) {
+      return context(http_status_error_from_json_body(*response));
     }
     EmbeddingResponseBody body;
     if (const auto error =

@@ -10,8 +10,10 @@ void test_chat_completions() {
   stub->response.body =
       R"({"choices":[{"index":0,"finish_reason":"tool_calls","message":{"content":"Searching","tool_calls":[{"id":"call-1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":10}}})";
   cail::detail::chat_completions::Client client(
-      "https://example.test/v1/chat/completions", "test-model", "test-key",
-      {{.name = "X-App", .value = "cail"}}, std::move(transport));
+      {.endpoint = "https://example.test/v1/chat/completions",
+       .api_key = "test-key",
+       .headers = {{.name = "X-App", .value = "cail"}}},
+      "test-model", std::move(transport));
   const auto response = client.generate(cail::GenerationRequest{
       .messages = {cail::Message{.role = cail::MessageRole::user,
                                  .content = {cail::TextPart{.text = "Find x"}}}},
@@ -45,8 +47,9 @@ void test_chat_completions_stream() {
       "\n\n",
       "data: [DONE]\n\n",
   };
-  cail::detail::chat_completions::Client client("https://example.test/v1/chat/completions",
-                                                "test-model", "test-key", {}, std::move(transport));
+  cail::detail::chat_completions::Client client(
+      {.endpoint = "https://example.test/v1/chat/completions", .api_key = "test-key"}, "test-model",
+      std::move(transport));
   std::vector<cail::StreamEvent> events;
   const auto response = client.stream(
       cail::GenerationRequest{
@@ -80,8 +83,9 @@ void test_chat_completions_mistral_content() {
       "done\"},\"finish_reason\":\"stop\"}]}\n\n",
       "data: [DONE]\n\n",
   };
-  cail::detail::chat_completions::Client client("https://example.test/v1/chat/completions",
-                                                "test-model", "test-key", {}, std::move(transport));
+  cail::detail::chat_completions::Client client(
+      {.endpoint = "https://example.test/v1/chat/completions", .api_key = "test-key"}, "test-model",
+      std::move(transport));
   std::vector<cail::StreamEvent> events;
   const auto response = client.stream(
       cail::GenerationRequest{
@@ -100,8 +104,9 @@ void test_chat_completions_history_and_image() {
   auto* stub = transport.get();
   stub->response.body =
       R"({"choices":[{"index":0,"finish_reason":"stop","message":{"content":"Done"}}]})";
-  cail::detail::chat_completions::Client client("https://example.test/v1/chat/completions",
-                                                "test-model", "test-key", {}, std::move(transport));
+  cail::detail::chat_completions::Client client(
+      {.endpoint = "https://example.test/v1/chat/completions", .api_key = "test-key"}, "test-model",
+      std::move(transport));
   const auto
       response = client
                      .generate(
@@ -135,8 +140,9 @@ void test_chat_completions_structured_output() {
   auto* stub = transport.get();
   stub->response.body =
       R"({"choices":[{"index":0,"finish_reason":"stop","message":{"content":"{\"answer\":\"yes\",\"confidence\":null,\"address\":null}"}}]})";
-  cail::detail::chat_completions::Client client("https://example.test/v1/chat/completions",
-                                                "test-model", "test-key", {}, std::move(transport));
+  cail::detail::chat_completions::Client client(
+      {.endpoint = "https://example.test/v1/chat/completions", .api_key = "test-key"}, "test-model",
+      std::move(transport));
   const auto response = client.generate(cail::GenerationRequest{
       .messages = {cail::Message{.content = {cail::TextPart{.text = "Classify this."}}}},
       .structured_output =

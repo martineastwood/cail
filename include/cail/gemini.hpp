@@ -106,14 +106,6 @@ struct ResponseBody {
   std::vector<Candidate> candidates;
   std::optional<Usage> usageMetadata;
 };
-struct ProviderError {
-  std::string message;
-  std::optional<std::string> status;
-};
-struct ErrorBody {
-  std::optional<ProviderError> error;
-};
-
 [[nodiscard]] inline const cail::ToolCall* find_tool_call(const GenerationRequest& request,
                                                           std::string_view id) {
   for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it) {
@@ -124,27 +116,6 @@ struct ErrorBody {
     }
   }
   return nullptr;
-}
-
-[[nodiscard]] inline Result<std::optional<std::string>>
-thought_signature(const cail::ToolCall& call) {
-  if (!call.provider_options.contains("thought_signature")) {
-    return std::optional<std::string>{};
-  }
-  const auto* signature = call.provider_options.at("thought_signature").get_if<std::string>();
-  if (!signature) {
-    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                 .message = "Gemini thought_signature must be a string."});
-  }
-  return *signature;
-}
-
-[[nodiscard]] inline ProviderOptions
-encode_tool_options(const std::optional<std::string>& thought_signature) {
-  if (!thought_signature) {
-    return {};
-  }
-  return {{"thought_signature", *thought_signature}};
 }
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request) {
@@ -247,15 +218,21 @@ encode_tool_options(const std::optional<std::string>& thought_signature) {
         return std::unexpected(
             Error{.code = ErrorCode::invalid_tool_call,
                   .message = "Gemini function calls require an ID, name, and JSON arguments."});
-      auto signature = thought_signature(call);
-      if (!signature)
-        return std::unexpected(signature.error());
+      std::optional<std::string> signature;
+      if (call.provider_options.contains("thought_signature")) {
+        const auto* value = call.provider_options.at("thought_signature").get_if<std::string>();
+        if (!value) {
+          return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                       .message = "Gemini thought_signature must be a string."});
+        }
+        signature = *value;
+      }
       auto added =
           append_json(content.parts,
                       CallPart{.functionCall = FunctionCall{.name = call.name,
                                                             .args = glz::raw_json{call.arguments},
                                                             .id = call.id},
-                               .thoughtSignature = *signature});
+                               .thoughtSignature = std::move(signature)});
       if (!added)
         return std::unexpected(added.error());
     }
@@ -345,12 +322,13 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
         return std::unexpected(Error{.code = ErrorCode::provider_response,
                                      .message = "Gemini returned a function call without an ID."});
       }
-      auto options = encode_tool_options(part.thoughtSignature);
       cail::ToolCall mapped{
           .id = *call.id,
           .name = call.name,
           .arguments = call.args.str,
-          .provider_options = std::move(options),
+          .provider_options = part.thoughtSignature
+                                  ? ProviderOptions{{"thought_signature", *part.thoughtSignature}}
+                                  : ProviderOptions{},
       };
       if (on_event)
         on_event(
@@ -488,14 +466,8 @@ private:
     const auto context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
     };
-    if (response->status_code < 200 || response->status_code >= 300) {
-      ErrorBody error;
-      const auto parsed =
-          glz::read<glz::opts{.error_on_unknown_keys = false}>(error, response->body);
-      return context(
-          Error{.code = ErrorCode::http_status,
-                .message = !parsed && error.error ? error.error->message : response->body,
-                .provider_type = !parsed && error.error ? error.error->status.value_or("") : ""});
+    if (is_http_error_status(response->status_code)) {
+      return context(http_status_error_from_json_body(*response));
     }
     if (handler) {
       parser.finish(handle_event);

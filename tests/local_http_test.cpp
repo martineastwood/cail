@@ -35,7 +35,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::string base = argv[1];
-  cail::detail::chat_completions::Client chat(base + "/chat", "test-model", "test-key", {});
+  cail::detail::chat_completions::Client chat({.endpoint = base + "/chat", .api_key = "test-key"},
+                                              "test-model");
   const auto chat_result = chat.generate(prompt());
   check(chat_result && chat_result->text == "Hello", "Chat Completions HTTP response");
 
@@ -59,8 +60,8 @@ int main(int argc, char** argv) {
             chat_stream->usage->input_tokens == 3,
         "Chat Completions SSE and usage");
 
-  cail::detail::chat_completions::Client structured(base + "/chat/structured", "test-model",
-                                                    "test-key", {});
+  cail::detail::chat_completions::Client structured(
+      {.endpoint = base + "/chat/structured", .api_key = "test-key"}, "test-model");
   auto structured_request = prompt();
   structured_request.structured_output =
       cail::StructuredOutput{.name = "answer", .schema = cail::schema<Answer>()};
@@ -73,14 +74,14 @@ int main(int argc, char** argv) {
   check(!unsupported && unsupported.error().code == cail::ErrorCode::invalid_configuration,
         "Chat Completions rejects provider continuation state");
 
-  cail::detail::chat_completions::Client truncated_chat(base + "/chat/truncated", "test-model",
-                                                        "test-key", {});
+  cail::detail::chat_completions::Client truncated_chat(
+      {.endpoint = base + "/chat/truncated", .api_key = "test-key"}, "test-model");
   const auto truncated = truncated_chat.stream(prompt(), [](const cail::StreamEvent&) {});
   check(!truncated && truncated.error().code == cail::ErrorCode::provider_response,
         "Chat Completions rejects an interrupted stream");
 
-  cail::detail::chat_completions::Client bad_chat(base + "/chat/error", "test-model", "test-key",
-                                                  {});
+  cail::detail::chat_completions::Client bad_chat(
+      {.endpoint = base + "/chat/error", .api_key = "test-key"}, "test-model");
   const auto bad_result = bad_chat.generate(prompt());
   check(!bad_result && bad_result.error().code == cail::ErrorCode::http_status &&
             bad_result.error().http_status == 429 &&
@@ -277,8 +278,8 @@ int main(int argc, char** argv) {
             gemini_caps.structured_output && !gemini_caps.continuation,
         "Adapter capabilities reflect what each integration can encode and parse");
 
-  cail::detail::chat_completions::Client held_chat(base + "/chat/hold", "test-model", "test-key",
-                                                   {});
+  cail::detail::chat_completions::Client held_chat(
+      {.endpoint = base + "/chat/hold", .api_key = "test-key"}, "test-model");
   std::stop_source stop;
   const auto began = std::chrono::steady_clock::now();
   const auto cancelled = held_chat.stream(
