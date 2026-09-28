@@ -1,9 +1,11 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(glaze 8.4.0 EXACT CONFIG REQUIRED)
+# Minimum versions, not exact ones: a consumer that already depends on a newer
+# Glaze or magic_enum must stay resolvable.
+find_dependency(glaze 8.4.0 CONFIG REQUIRED)
 glaze_setup_asio()
-find_dependency(magic_enum 0.9.8 EXACT CONFIG REQUIRED)
+find_dependency(magic_enum CONFIG REQUIRED)
 
 include("${CMAKE_CURRENT_LIST_DIR}/cailTargets.cmake")
 target_link_libraries(cail::cail INTERFACE glaze::asio)

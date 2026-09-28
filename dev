@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+BUILD_DIR="${BUILD_DIR:-build/dev}"
+SANITIZER_DIR="${SANITIZER_DIR:-build/asan}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+# CI pins this exact version through pip, so a local mismatch means a surprise
+# failure later. Homebrew's llvm@23 is the same release.
+CLANG_FORMAT_VERSION="${CLANG_FORMAT_VERSION:-23.1.1}"
+
+log() { printf '==> %s\n' "$*"; }
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+find_tool() {
+  local name="$1"
+  shift
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  for candidate in "$@"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+clang_format_tool() {
+  find_tool clang-format \
+    /opt/homebrew/opt/llvm@23/bin/clang-format \
+    /opt/homebrew/opt/llvm/bin/clang-format \
+    /usr/local/opt/llvm/bin/clang-format || die "clang-format not found"
+}
+
+source_files() {
+  find include tests examples test_package -type f \( -name '*.cpp' -o -name '*.hpp' \) | sort
+}
+
+# CAIL is header-only, so clang-tidy reaches the library through the test
+# translation units and reports on include/ via HeaderFilterRegex.
+tidy_files() {
+  find tests -type f -name '*.cpp' | sort
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./dev <command> [options]
+
+Commands:
+  format [--fix]        Check formatting (--fix rewrites the files)
+  configure [dir]       Configure a build directory
+  build [dir] [target]  Build a directory, or one target
+  test [dir] [regex]    Run the CTest suites
+  tidy [--fix]          Run clang-tidy over the test translation units
+  sanitizer             Build and test with ASan and UBSan
+  check                 Format check, configure, build, and test
+  clean                 Remove the build directories
+
+Extra arguments after a directory are passed to CMake, for example:
+  ./dev configure build/dev -DCMAKE_CXX_COMPILER=clang++
+
+Environment:
+  BUILD_DIR             Default build directory (build/dev)
+  JOBS                  Parallel job count
+  CAIL_FETCHCONTENT_BASE_DIR
+                        Reuse a shared dependency checkout
+EOF
+}
+
+cmd_format() {
+  local clang_format
+  clang_format="$(clang_format_tool)"
+  local fix=false
+  [[ "${1:-}" == "--fix" ]] && fix=true
+
+  local version
+  version="$("$clang_format" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  if [[ "$version" != "$CLANG_FORMAT_VERSION" ]]; then
+    printf 'warning: clang-format %s found, CI uses %s\n' "$version" "$CLANG_FORMAT_VERSION" >&2
+  fi
+
+  log "format (clang-format $version)"
+  local files
+  files="$(source_files)"
+  [[ -n "$files" ]] || die "no source files found"
+  if $fix; then
+    # shellcheck disable=SC2086
+    "$clang_format" -i $files
+  else
+    # shellcheck disable=SC2086
+    "$clang_format" --dry-run --Werror $files
+  fi
+}
+
+cmd_configure() {
+  local dir="$BUILD_DIR"
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    dir="$1"
+    shift
+  fi
+  local cache=()
+  # Reuse a shared dependency checkout so CI and local builds skip the clone.
+  [[ -n "${CAIL_FETCHCONTENT_BASE_DIR:-}" ]] &&
+    cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
+  log "configure ($dir)"
+  cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}" \
+    -DCAIL_BUILD_EXAMPLES=ON -DBUILD_TESTING=ON \
+    ${cache[@]+"${cache[@]}"} ${1+"$@"}
+}
+
+cmd_build() {
+  local dir="${1:-$BUILD_DIR}"
+  local target="${2:-}"
+  log "build ($dir${target:+ $target})"
+  cmake --build "$dir" --parallel "$JOBS" ${target:+--target "$target"}
+}
+
+cmd_test() {
+  local dir="${1:-$BUILD_DIR}"
+  local filter="${2:-}"
+  log "test ($dir${filter:+ -R $filter})"
+  ctest --test-dir "$dir" --output-on-failure ${filter:+-R "$filter"}
+}
+
+cmd_tidy() {
+  local clang_tidy
+  clang_tidy="$(find_tool clang-tidy \
+    /opt/homebrew/opt/llvm@23/bin/clang-tidy \
+    /opt/homebrew/opt/llvm/bin/clang-tidy \
+    /usr/local/opt/llvm/bin/clang-tidy)" || die "clang-tidy not found"
+  [[ -f "$BUILD_DIR/compile_commands.json" ]] ||
+    die "missing $BUILD_DIR/compile_commands.json; run ./dev configure first"
+
+  local args=(-p "$BUILD_DIR" -quiet)
+  [[ "${1:-}" == "--fix" ]] && args+=(-fix)
+
+  local sdkroot
+  sdkroot="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+  [[ -n "$sdkroot" ]] && args+=(-extra-arg=-isysroot -extra-arg="$sdkroot")
+
+  local files
+  files="$(tidy_files)"
+  log "tidy ($(echo "$files" | wc -l | tr -d ' ') translation units)"
+  # shellcheck disable=SC2086
+  "$clang_tidy" "${args[@]}" $files
+}
+
+cmd_sanitizer() {
+  log "sanitizer ($SANITIZER_DIR)"
+  local flags="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+  local cache=()
+  [[ -n "${CAIL_FETCHCONTENT_BASE_DIR:-}" ]] &&
+    cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
+  cmake -S . -B "$SANITIZER_DIR" -DCMAKE_BUILD_TYPE=Debug \
+    -DCAIL_BUILD_EXAMPLES=OFF -DBUILD_TESTING=ON \
+    -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="$flags" \
+    ${cache[@]+"${cache[@]}"} "$@"
+  cmake --build "$SANITIZER_DIR" --parallel "$JOBS"
+  ctest --test-dir "$SANITIZER_DIR" --output-on-failure
+}
+
+cmd_check() {
+  cmd_format
+  cmd_configure "$BUILD_DIR"
+  cmd_build "$BUILD_DIR"
+  cmd_test "$BUILD_DIR"
+}
+
+cmd_clean() {
+  log "clean"
+  rm -rf "$BUILD_DIR" "$SANITIZER_DIR"
+}
+
+[[ $# -ge 1 ]] || {
+  usage
+  exit 1
+}
+command="$1"
+shift
+case "$command" in
+  format) cmd_format "$@" ;;
+  configure) cmd_configure "$@" ;;
+  build) cmd_build "$@" ;;
+  test) cmd_test "$@" ;;
+  tidy) cmd_tidy "$@" ;;
+  sanitizer) cmd_sanitizer "$@" ;;
+  check) cmd_check "$@" ;;
+  clean) cmd_clean "$@" ;;
+  -h | --help | help) usage ;;
+  *) die "unknown command: $command" ;;
+esac

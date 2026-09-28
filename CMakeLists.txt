@@ -17,24 +17,64 @@ set(glaze_ENABLE_SSL ON)
 # INTERFACE target when SSL is enabled. Keep that setting disabled for its CMake target.
 set(glaze_INCLUDES_WITH_SYSTEM OFF)
 
+# FIND_PACKAGE_ARGS lets package managers and offline builds supply Glaze and
+# magic_enum instead of downloading them.
 FetchContent_Declare(
     glaze
     GIT_REPOSITORY https://github.com/stephenberry/glaze.git
     GIT_TAG v8.4.0
     GIT_SHALLOW TRUE
+    FIND_PACKAGE_ARGS 8.4.0 CONFIG
 )
 FetchContent_MakeAvailable(glaze)
 
-include("${glaze_SOURCE_DIR}/cmake/glaze-asio.cmake")
-glaze_setup_asio()
+# Glaze's own CMake module selects the Asio backend. A Glaze source tree does not
+# load it, and header-only packages such as the Conan Center recipe ship it at all,
+# so load it when present and otherwise select a backend here.
+if(EXISTS "${glaze_SOURCE_DIR}/cmake/glaze-asio.cmake")
+    include("${glaze_SOURCE_DIR}/cmake/glaze-asio.cmake")
+endif()
 
+if(COMMAND glaze_setup_asio)
+    glaze_setup_asio()
+else()
+    message(STATUS "cail: Glaze ships no Asio module, selecting a backend here")
+    # Provider clients need HTTPS, so carry the SSL wiring that Glaze's own CMake
+    # adds for glaze_ENABLE_SSL, which CAIL turns on for the fetched build.
+    find_package(OpenSSL REQUIRED)
+    find_package(Boost QUIET CONFIG)
+    find_package(Asio QUIET CONFIG)
+    add_library(cail_glaze_backend INTERFACE)
+    add_library(glaze::asio ALIAS cail_glaze_backend)
+    target_compile_definitions(cail_glaze_backend INTERFACE GLZ_ENABLE_SSL)
+    target_link_libraries(cail_glaze_backend INTERFACE OpenSSL::SSL OpenSSL::Crypto)
+    if(Boost_FOUND)
+        # Keep the header in step with the backend, as Glaze's module does.
+        target_compile_definitions(cail_glaze_backend INTERFACE GLZ_USE_BOOST_ASIO)
+        if(TARGET Boost::headers)
+            target_link_libraries(cail_glaze_backend INTERFACE Boost::headers)
+        else()
+            target_link_libraries(cail_glaze_backend INTERFACE Boost::boost)
+        endif()
+    elseif(TARGET asio::asio)
+        target_link_libraries(cail_glaze_backend INTERFACE asio::asio)
+    elseif(TARGET Asio::Asio)
+        target_link_libraries(cail_glaze_backend INTERFACE Asio::Asio)
+    else()
+        message(FATAL_ERROR
+            "CAIL needs an Asio backend. Install Boost or standalone Asio, or use a "
+            "Glaze that ships cmake/glaze-asio.cmake.")
+    endif()
+endif()
+
+set(MAGIC_ENUM_OPT_INSTALL ON)
 FetchContent_Declare(
     magic_enum
     GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
     GIT_TAG v0.9.8
     GIT_SHALLOW TRUE
+    FIND_PACKAGE_ARGS CONFIG
 )
-set(MAGIC_ENUM_OPT_INSTALL ON)
 FetchContent_MakeAvailable(magic_enum)
 
 add_library(cail INTERFACE)

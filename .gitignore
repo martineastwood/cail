@@ -1,6 +1,7 @@
 build/
 .cache/
 compile_commands.json
+CMakeUserPresets.json
 ROADMAP.md
 AGENTS.md
 .DS_Store

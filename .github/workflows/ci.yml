@@ -1,0 +1,150 @@
+name: C++ checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cail-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep this in step with CLANG_FORMAT_VERSION in ./dev. The pip package is
+  # version exact, so CI and local runs cannot drift apart.
+  CLANG_FORMAT_VERSION: 23.1.1
+  # CAIL needs CMake 3.31, which is newer than the runner images ship.
+  CMAKE_VERSION: 3.31.10
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: pip install "clang-format==$CLANG_FORMAT_VERSION"
+
+      - name: Check formatting
+        run: ./dev format
+
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (gcc)
+            os: ubuntu-24.04
+            cxx: g++
+          - name: Linux (clang)
+            os: ubuntu-24.04
+            cxx: clang++
+          - name: macOS (AppleClang)
+            os: macos-15
+            cxx: clang++
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang libssl-dev
+
+      - name: Install CMake
+        run: pip install "cmake==$CMAKE_VERSION"
+
+      - name: Restore dependency checkout
+        uses: actions/cache@v4
+        with:
+          path: .cache/cail-fetchcontent
+          key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            cail-deps-${{ runner.os }}-
+
+      - name: Configure, build, and test
+        env:
+          CXX: ${{ matrix.cxx }}
+          CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+        run: |
+          mkdir -p .cache/cail-fetchcontent
+          ./dev check
+
+  sanitizer:
+    name: ASan and UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++ libssl-dev
+
+      - name: Install CMake
+        run: pip install "cmake==$CMAKE_VERSION"
+
+      - name: Restore dependency checkout
+        uses: actions/cache@v4
+        with:
+          path: .cache/cail-fetchcontent
+          key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            cail-deps-${{ runner.os }}-
+
+      - name: Build and test with sanitizers
+        env:
+          CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+        run: |
+          mkdir -p .cache/cail-fetchcontent
+          ./dev sanitizer
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++ libssl-dev clang-tidy-20
+          # Ubuntu's default Clang cannot parse libstdc++'s C++23 <expected> header.
+          sudo ln -sf /usr/bin/clang-tidy-20 /usr/local/bin/clang-tidy
+
+      - name: Install CMake
+        run: pip install "cmake==$CMAKE_VERSION"
+
+      - name: Restore dependency checkout
+        uses: actions/cache@v4
+        with:
+          path: .cache/cail-fetchcontent
+          key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            cail-deps-${{ runner.os }}-
+
+      # clang-tidy only needs the compile commands, not a built binary.
+      - name: Configure
+        env:
+          CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+        run: |
+          mkdir -p .cache/cail-fetchcontent
+          ./dev configure
+
+      - name: Run clang-tidy
+        run: ./dev tidy

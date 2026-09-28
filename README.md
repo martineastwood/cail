@@ -7,7 +7,18 @@ A typed C++ SDK for LLM providers, with a provider-neutral model and generation 
 - CMake 3.31 or newer
 - A C++23 compiler supported by the pinned Glaze release
 - OpenSSL development files for HTTPS transport
-- Network access during the initial CMake configure for pinned FetchContent dependencies
+
+CAIL builds against [Glaze](https://github.com/stephenberry/glaze) 8.4.0 or newer and
+[magic_enum](https://github.com/Neargye/magic_enum). The first CMake configure downloads
+them unless you already have them installed. Install them yourself, or point CMake at a
+prefix that contains them, to build without network access:
+
+```sh
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/deps
+```
+
+Installing CAIL also installs Glaze and magic_enum into the same prefix, so a project that
+consumes the installed package resolves both through `CMAKE_PREFIX_PATH` alone.
 
 ## Install as a CMake package
 
@@ -28,19 +39,55 @@ target_link_libraries(app PRIVATE cail::cail)
 
 Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
 
-## Run a focused test suite
+## Build and test from source
 
-Build and run only the OpenAI adapter tests:
+The `./dev` script wraps configure, build, test, formatting, and static analysis. Run
+everything the way CI does:
 
 ```sh
-cmake -S . -B build -DCAIL_BUILD_EXAMPLES=OFF
-cmake --build build --target cail_openai_test
-ctest --test-dir build --output-on-failure -R '^cail_openai$'
+./dev check
 ```
 
-Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`,
-and `cail_opencode`. Use the matching `cail_<suite>_test` target to build one
-group. CAIL also provides `cail_local_http` and `cail_install_smoke` checks.
+Run one suite while you iterate on an adapter:
+
+```sh
+./dev configure
+./dev build build/dev cail_openai_test
+./dev test build/dev cail_openai
+```
+
+Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`, and
+`cail_opencode`. CAIL also provides `cail_local_http`, which starts a local Python server,
+and `cail_install_smoke`, which builds a consumer against the installed package.
+
+Run the remaining checks before you open a pull request:
+
+```sh
+./dev format        # Check formatting. ./dev format --fix rewrites the files.
+./dev tidy          # clang-tidy over the test translation units.
+./dev sanitizer     # Build and test with ASan and UBSan.
+```
+
+Formatting is pinned to `clang-format` 23.1.1. `./dev format` warns when your local
+version differs from the one CI uses.
+
+## Compile time
+
+CAIL is header-only, so each translation unit that includes it also parses Glaze, Asio, and
+OpenSSL. Measured on an Apple M1 Pro with AppleClang 17, best of three runs:
+
+| Included header | `-O0` | `-O2` |
+| --- | --- | --- |
+| `<cail/error.hpp>` | 0.1 s | 0.1 s |
+| `<cail/generation.hpp>` | 1.2 s | 1.2 s |
+| `<cail/openai.hpp>` | 6.7 s | 6.8 s |
+| `<cail/cail.hpp>` | 8.2 s | 8.2 s |
+
+The optimization level barely matters, because parsing the dependency headers dominates.
+Two things follow. Include the provider header you use rather than `<cail/cail.hpp>`, which
+saves about 1.5 s per translation unit. If several translation units call CAIL, give the
+project a precompiled header or a unity build, which is where the rest of the time comes
+back.
 
 ## Current implementation
 
