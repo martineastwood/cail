@@ -4,6 +4,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/openai_responses_wire.hpp>
 #include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
@@ -11,7 +12,6 @@
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
 #include <cail/openai_embeddings.hpp>
-#include <cail/detail/openai_responses_wire.hpp>
 #include <cail/tool.hpp>
 
 #include <glaze/glaze.hpp>
@@ -44,39 +44,35 @@ struct MessageOptions {
 class Client {
 public:
   explicit Client(Config config)
-      : Client(std::move(config),
-               std::make_unique<cail::detail::GlazeHttpTransport>()) {}
+      : Client(std::move(config), std::make_unique<cail::detail::GlazeHttpTransport>()) {}
 
   Client(Config config, std::unique_ptr<HttpTransport> transport)
       : config_(std::move(config)), transport_(std::move(transport)) {}
 
-  [[nodiscard]] Result<GenerationResponse>
-  generate(const GenerationRequest &request) const {
+  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
     return generate_impl(request, {});
   }
 
-  [[nodiscard]] Result<GenerationResponse>
-  stream(const GenerationRequest &request, const StreamHandler &on_event,
-         std::stop_token stop = {}) const {
+  [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
+                                                  const StreamHandler& on_event,
+                                                  std::stop_token stop = {}) const {
     return generate_impl(request, on_event, stop);
   }
 
   [[nodiscard]] Result<GenerationResponse>
-  stream(std::string_view prompt, const StreamHandler &on_event,
-         std::stop_token stop = {}) const {
+  stream(std::string_view prompt, const StreamHandler& on_event, std::stop_token stop = {}) const {
     return stream(
         GenerationRequest{
-            .messages = {Message{
-                .role = MessageRole::user,
-                .content = {TextPart{.text = std::string{prompt}}}}},
+            .messages = {Message{.role = MessageRole::user,
+                                 .content = {TextPart{.text = std::string{prompt}}}}},
         },
         on_event, stop);
   }
 
 private:
-  [[nodiscard]] Result<GenerationResponse>
-  generate_impl(const GenerationRequest &request, const StreamHandler &on_event,
-                std::stop_token stop = {}) const {
+  [[nodiscard]] Result<GenerationResponse> generate_impl(const GenerationRequest& request,
+                                                         const StreamHandler& on_event,
+                                                         std::stop_token stop = {}) const {
     const bool streaming = static_cast<bool>(on_event);
     if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
@@ -84,15 +80,14 @@ private:
     if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
       return std::unexpected(valid.error());
     }
-    if (config_.api_key.empty() || config_.model.empty() ||
-        config_.base_url.empty() || !transport_) {
+    if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
+        !transport_) {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
-          .message =
-              "The OpenAI Responses adapter requires a non-empty API key "
-              "(set the provider's environment key or pass api_key), model, "
-              "base URL, "
-              "and HTTP transport.",
+          .message = "The OpenAI Responses adapter requires a non-empty API key "
+                     "(set the provider's environment key or pass api_key), model, "
+                     "base URL, "
+                     "and HTTP transport.",
       });
     }
     if (request.messages.empty()) {
@@ -119,7 +114,7 @@ private:
       body.previous_response_id = request.continuation_token;
     }
 
-    const auto append_input = [&body](const auto &item) -> Result<void> {
+    const auto append_input = [&body](const auto& item) -> Result<void> {
       auto encoded_item = to_json(item);
       if (!encoded_item) {
         return std::unexpected(encoded_item.error());
@@ -134,18 +129,16 @@ private:
         return {};
       }
       auto content = wire::input_content(
-          Message{.role = MessageRole::user,
-                  .content = std::move(pending_tool_images)});
+          Message{.role = MessageRole::user, .content = std::move(pending_tool_images)});
       if (!content) {
         return std::unexpected(content.error());
       }
       pending_tool_images.clear();
-      return append_input(wire::InputMessage{
-          .role = "user", .content = std::move(*content)});
+      return append_input(wire::InputMessage{.role = "user", .content = std::move(*content)});
     };
 
     body.input.reserve(request.messages.size());
-    for (const auto &message : request.messages) {
+    for (const auto& message : request.messages) {
       if (message.role != MessageRole::tool) {
         if (auto flushed = flush_tool_images(); !flushed) {
           return std::unexpected(flushed.error());
@@ -160,17 +153,16 @@ private:
           });
         }
         std::string output;
-        for (const auto &part : message.content) {
-          if (const auto *text = std::get_if<TextPart>(&part)) {
+        for (const auto& part : message.content) {
+          if (const auto* text = std::get_if<TextPart>(&part)) {
             output += text->text;
           } else {
-            const auto &image = std::get<ImagePart>(part);
+            const auto& image = std::get<ImagePart>(part);
             if (image.mime_type.empty() || image.bytes.empty()) {
               return std::unexpected(Error{
                   .code = ErrorCode::invalid_configuration,
-                  .message =
-                      "Tool result images require non-empty bytes and a MIME "
-                      "type.",
+                  .message = "Tool result images require non-empty bytes and a MIME "
+                             "type.",
               });
             }
             pending_tool_images.emplace_back(image);
@@ -194,8 +186,7 @@ private:
                        "misplaced tool call ID.",
         });
       }
-      if (message.role != MessageRole::assistant &&
-          !message.tool_calls.empty()) {
+      if (message.role != MessageRole::assistant && !message.tool_calls.empty()) {
         return std::unexpected(Error{
             .code = ErrorCode::invalid_tool_call,
             .message = "Only assistant messages can contain tool calls.",
@@ -204,9 +195,8 @@ private:
 
       if (message.role == MessageRole::assistant && message.provider_options) {
         MessageOptions options;
-        if (const auto error =
-                glz::read<glz::opts{.error_on_unknown_keys = false}>(
-                    options, *message.provider_options);
+        if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(
+                options, *message.provider_options);
             error) {
           return std::unexpected(Error{
               .code = ErrorCode::invalid_configuration,
@@ -215,7 +205,7 @@ private:
               .byte_offset = error.count,
           });
         }
-        for (const auto &raw_item : options.reasoning_details) {
+        for (const auto& raw_item : options.reasoning_details) {
           auto item = wire::decode_response_item(raw_item, 0);
           if (!item) {
             return std::unexpected(item.error());
@@ -239,9 +229,8 @@ private:
           return std::unexpected(result.error());
         }
       }
-      for (const auto &tool_call : message.tool_calls) {
-        if (tool_call.id.empty() || tool_call.name.empty() ||
-            tool_call.arguments.empty()) {
+      for (const auto& tool_call : message.tool_calls) {
+        if (tool_call.id.empty() || tool_call.name.empty() || tool_call.arguments.empty()) {
           return std::unexpected(Error{
               .code = ErrorCode::invalid_tool_call,
               .message = "An assistant tool call requires an ID, name, and "
@@ -266,7 +255,7 @@ private:
       body.tools.emplace();
       body.tools->reserve(request.tools.size());
       for (std::size_t i = 0; i < request.tools.size(); ++i) {
-        const auto &tool = request.tools[i];
+        const auto& tool = request.tools[i];
         if (tool.name.empty()) {
           return std::unexpected(Error{
               .code = ErrorCode::invalid_configuration,
@@ -281,8 +270,7 @@ private:
             });
           }
         }
-        auto strict_parameters =
-            cail::detail::strict_json_schema(tool.parameters);
+        auto strict_parameters = cail::detail::strict_json_schema(tool.parameters);
         if (!strict_parameters) {
           return std::unexpected(strict_parameters.error());
         }
@@ -375,30 +363,25 @@ private:
         .url = std::move(endpoint),
         .headers =
             {
-                HttpHeader{.name = "Authorization",
-                           .value = "Bearer " + config_.api_key},
+                HttpHeader{.name = "Authorization", .value = "Bearer " + config_.api_key},
                 HttpHeader{.name = "Content-Type", .value = "application/json"},
                 HttpHeader{.name = "Accept",
-                           .value = streaming ? "text/event-stream"
-                                              : "application/json"},
+                           .value = streaming ? "text/event-stream" : "application/json"},
             },
         .body = std::move(*encoded),
     };
-    cail::detail::append_session_header(http_request.headers,
-                                        config_.request_session_header,
+    cail::detail::append_session_header(http_request.headers, config_.request_session_header,
                                         request.session_id);
     if (request.before_request) {
       try {
         request.before_request(http_request);
       } catch (const std::exception& error) {
-        return std::unexpected(Error{
-            .code = ErrorCode::invalid_configuration,
-            .message = std::string{"The before-request callback failed: "} +
-                       error.what()});
+        return std::unexpected(
+            Error{.code = ErrorCode::invalid_configuration,
+                  .message = std::string{"The before-request callback failed: "} + error.what()});
       } catch (...) {
-        return std::unexpected(Error{
-            .code = ErrorCode::invalid_configuration,
-            .message = "The before-request callback failed."});
+        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                     .message = "The before-request callback failed."});
       }
     }
 
@@ -406,15 +389,13 @@ private:
     std::optional<wire::ResponseBody> streamed_response;
     std::optional<Error> stream_error;
     std::string reasoning;
-    const auto handle_event = [&](const cail::detail::ServerSentEvent &event) {
-      if (stop.stop_requested() || stream_error || event.data.empty() ||
-          event.data == "[DONE]") {
+    const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
+      if (stop.stop_requested() || stream_error || event.data.empty() || event.data == "[DONE]") {
         return;
       }
       wire::StreamEventBody stream_event{};
       if (const auto error =
-              glz::read<glz::opts{.error_on_unknown_keys = false}>(stream_event,
-                                                                   event.data);
+              glz::read<glz::opts{.error_on_unknown_keys = false}>(stream_event, event.data);
           error) {
         stream_error = Error{
             .code = ErrorCode::provider_response,
@@ -426,20 +407,16 @@ private:
       if (stream_event.type.empty()) {
         stream_event.type = event.event;
       }
-      if (stream_event.type == "response.output_text.delta" &&
-          stream_event.delta) {
+      if (stream_event.type == "response.output_text.delta" && stream_event.delta) {
         on_event(StreamEvent{TextDelta{.text = *stream_event.delta}});
-      } else if (stream_event.type == "response.refusal.delta" &&
-                 stream_event.delta) {
+      } else if (stream_event.type == "response.refusal.delta" && stream_event.delta) {
         on_event(StreamEvent{RefusalDelta{.text = *stream_event.delta}});
       } else if ((stream_event.type == "response.reasoning_text.delta" ||
-                  stream_event.type ==
-                      "response.reasoning_summary_text.delta") &&
+                  stream_event.type == "response.reasoning_summary_text.delta") &&
                  stream_event.delta) {
         reasoning += *stream_event.delta;
         on_event(StreamEvent{ReasoningDelta{.text = *stream_event.delta}});
-      } else if (stream_event.type ==
-                     "response.function_call_arguments.delta" &&
+      } else if (stream_event.type == "response.function_call_arguments.delta" &&
                  stream_event.delta) {
         if (stream_event.output_index) {
           on_event(StreamEvent{ToolCallArgumentsDelta{
@@ -454,26 +431,22 @@ private:
       } else if (stream_event.type == "error") {
         stream_error = Error{
             .code = ErrorCode::provider_response,
-            .message = stream_event.message.value_or(
-                stream_event.error ? stream_event.error->message
-                                   : "OpenAI returned a streaming error."),
-            .provider_code = stream_event.error && stream_event.error->code
-                                 ? *stream_event.error->code
-                                 : "",
-            .provider_type = stream_event.error && stream_event.error->type
-                                 ? *stream_event.error->type
-                                 : "",
+            .message = stream_event.message.value_or(stream_event.error
+                                                         ? stream_event.error->message
+                                                         : "OpenAI returned a streaming error."),
+            .provider_code =
+                stream_event.error && stream_event.error->code ? *stream_event.error->code : "",
+            .provider_type =
+                stream_event.error && stream_event.error->type ? *stream_event.error->type : "",
         };
       }
     };
 
-    auto http_response = streaming ? transport_->stream(
-                                         http_request,
-                                         [&](std::string_view bytes) {
-                                           sse_parser.feed(bytes, handle_event);
-                                         },
-                                         stop)
-                                   : transport_->send(http_request);
+    auto http_response =
+        streaming ? transport_->stream(
+                        http_request,
+                        [&](std::string_view bytes) { sse_parser.feed(bytes, handle_event); }, stop)
+                  : transport_->send(http_request);
     if (!http_response) {
       return std::unexpected(http_response.error());
     }
@@ -481,19 +454,16 @@ private:
       try {
         request.after_response(*http_response);
       } catch (const std::exception& error) {
-        return std::unexpected(Error{
-            .code = ErrorCode::provider_response,
-            .message = std::string{"The after-response callback failed: "} +
-                       error.what()});
+        return std::unexpected(
+            Error{.code = ErrorCode::provider_response,
+                  .message = std::string{"The after-response callback failed: "} + error.what()});
       } catch (...) {
-        return std::unexpected(Error{
-            .code = ErrorCode::provider_response,
-            .message = "The after-response callback failed."});
+        return std::unexpected(Error{.code = ErrorCode::provider_response,
+                                     .message = "The after-response callback failed."});
       }
     }
     const auto with_context = [&](Error error) {
-      return unexpected_with_http_context<GenerationResponse>(std::move(error),
-                                                              *http_response);
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), *http_response);
     };
     if (stop.stop_requested()) {
       return with_context(generation_cancelled_error());
@@ -501,24 +471,19 @@ private:
     if (http_response->status_code < 200 || http_response->status_code >= 300) {
       wire::ErrorBody error_body{};
       const auto parse_error =
-          glz::read<glz::opts{.error_on_unknown_keys = false}>(
-              error_body, http_response->body);
-      const auto message = !parse_error && error_body.error
-                               ? error_body.error->message
-                               : http_response->body;
+          glz::read<glz::opts{.error_on_unknown_keys = false}>(error_body, http_response->body);
+      const auto message =
+          !parse_error && error_body.error ? error_body.error->message : http_response->body;
       return with_context(Error{
           .code = ErrorCode::http_status,
-          .message = "OpenAI returned HTTP " +
-                     std::to_string(http_response->status_code) +
+          .message = "OpenAI returned HTTP " + std::to_string(http_response->status_code) +
                      (message.empty() ? "." : ": " + message),
-          .provider_code =
-              !parse_error && error_body.error && error_body.error->code
-                  ? *error_body.error->code
-                  : "",
-          .provider_type =
-              !parse_error && error_body.error && error_body.error->type
-                  ? *error_body.error->type
-                  : "",
+          .provider_code = !parse_error && error_body.error && error_body.error->code
+                               ? *error_body.error->code
+                               : "",
+          .provider_type = !parse_error && error_body.error && error_body.error->type
+                               ? *error_body.error->type
+                               : "",
       });
     }
 
@@ -530,14 +495,12 @@ private:
       if (!streamed_response) {
         return with_context(Error{
             .code = ErrorCode::provider_response,
-            .message =
-                "OpenAI closed the event stream without a completed response.",
+            .message = "OpenAI closed the event stream without a completed response.",
             .http_status = http_response->status_code,
         });
       }
       std::vector<std::size_t> call_indexes;
-      for (std::size_t index = 0; index < streamed_response->output.size();
-           ++index) {
+      for (std::size_t index = 0; index < streamed_response->output.size(); ++index) {
         auto item = wire::decode_response_item(streamed_response->output[index],
                                                http_response->status_code);
         if (!item) {
@@ -547,8 +510,8 @@ private:
           call_indexes.push_back(index);
         }
       }
-      auto result = wire::decode_response(std::move(*streamed_response),
-                                          http_response->status_code);
+      auto result =
+          wire::decode_response(std::move(*streamed_response), http_response->status_code);
       if (!result) {
         return with_context(result.error());
       }
@@ -579,8 +542,7 @@ private:
       });
     }
 
-    auto result = wire::decode_response(std::move(response_body),
-                                        http_response->status_code);
+    auto result = wire::decode_response(std::move(response_body), http_response->status_code);
     if (!result) {
       return with_context(result.error());
     }
@@ -588,35 +550,30 @@ private:
   }
 
 public:
-  [[nodiscard]] Result<GenerationResponse>
-  generate(std::string_view prompt) const {
+  [[nodiscard]] Result<GenerationResponse> generate(std::string_view prompt) const {
     return generate(GenerationRequest{
-        .messages = {Message{
-            .role = MessageRole::user,
-            .content = {TextPart{.text = std::string{prompt}}}}},
+        .messages = {Message{.role = MessageRole::user,
+                             .content = {TextPart{.text = std::string{prompt}}}}},
     });
   }
 
-  [[nodiscard]] Result<GenerationResponse>
-  generate(const GenerationRequest &request, std::vector<Tool> tools,
-           ToolLoopOptions options = {}) const {
+  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
+                                                    std::vector<Tool> tools,
+                                                    ToolLoopOptions options = {}) const {
     return cail::run_tool_loop(*this, request, tools, options);
   }
 
   [[nodiscard]] Result<GenerationResponse>
-  generate(std::string_view prompt, std::vector<Tool> tools,
-           ToolLoopOptions options = {}) const {
+  generate(std::string_view prompt, std::vector<Tool> tools, ToolLoopOptions options = {}) const {
     return generate(
         GenerationRequest{
-            .messages = {Message{
-                .role = MessageRole::user,
-                .content = {TextPart{.text = std::string{prompt}}}}},
+            .messages = {Message{.role = MessageRole::user,
+                                 .content = {TextPart{.text = std::string{prompt}}}}},
         },
         std::move(tools), options);
   }
 
-  template <typename T>
-  [[nodiscard]] Result<T> generate(const GenerationRequest &request) const {
+  template <typename T> [[nodiscard]] Result<T> generate(const GenerationRequest& request) const {
     GenerationRequest structured_request = request;
     structured_request.structured_output = StructuredOutput{
         .name = "cail_output",
@@ -630,8 +587,7 @@ public:
     if (response->status == GenerationStatus::refused) {
       return std::unexpected(Error{
           .code = ErrorCode::refused,
-          .message = response->text.empty() ? "OpenAI refused the request."
-                                            : response->text,
+          .message = response->text.empty() ? "OpenAI refused the request." : response->text,
       });
     }
     if (response->status == GenerationStatus::incomplete) {
@@ -650,12 +606,10 @@ public:
     return from_json<T>(response->text);
   }
 
-  template <typename T>
-  [[nodiscard]] Result<T> generate(std::string_view prompt) const {
+  template <typename T> [[nodiscard]] Result<T> generate(std::string_view prompt) const {
     return generate<T>(GenerationRequest{
-        .messages = {Message{
-            .role = MessageRole::user,
-            .content = {TextPart{.text = std::string{prompt}}}}},
+        .messages = {Message{.role = MessageRole::user,
+                             .content = {TextPart{.text = std::string{prompt}}}}},
     });
   }
 
@@ -668,37 +622,32 @@ private:
 
 namespace cail::detail {
 
-[[nodiscard]] constexpr AdapterCapabilities openai_responses_adapter_capabilities()
-{
-    return AdapterCapabilities{
-        .image_input = true,
-        .tools = true,
-        .structured_output = true,
-        .reasoning = true,
-        .continuation = true,
-    };
+[[nodiscard]] constexpr AdapterCapabilities openai_responses_adapter_capabilities() {
+  return AdapterCapabilities{
+      .image_input = true,
+      .tools = true,
+      .structured_output = true,
+      .reasoning = true,
+      .continuation = true,
+  };
 }
 
 [[nodiscard]] inline std::shared_ptr<openai::Client>
-make_openai_responses_client(openai::Config config,
-                             std::unique_ptr<HttpTransport> transport = {})
-{
-    if (transport) {
-        return std::make_shared<openai::Client>(std::move(config), std::move(transport));
-    }
-    return std::make_shared<openai::Client>(std::move(config));
+make_openai_responses_client(openai::Config config, std::unique_ptr<HttpTransport> transport = {}) {
+  if (transport) {
+    return std::make_shared<openai::Client>(std::move(config), std::move(transport));
+  }
+  return std::make_shared<openai::Client>(std::move(config));
 }
 
 [[nodiscard]] inline LanguageModel
-language_model_from(const std::shared_ptr<openai::Client>& client)
-{
-    return LanguageModel{
-        [client](const GenerationRequest& request) { return client->generate(request); },
-        [client](const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) {
-            return client->stream(request, handler, stop);
-        },
-        openai_responses_adapter_capabilities(),
-    };
+language_model_from(const std::shared_ptr<openai::Client>& client) {
+  return LanguageModel{
+      [client](const GenerationRequest& request) { return client->generate(request); },
+      [client](const GenerationRequest& request, const StreamHandler& handler,
+               std::stop_token stop) { return client->stream(request, handler, stop); },
+      openai_responses_adapter_capabilities(),
+  };
 }
 
 } // namespace cail::detail
@@ -708,48 +657,43 @@ language_model_from(const std::shared_ptr<openai::Client>& client)
 namespace cail {
 
 struct OpenAITag {
-    static constexpr const char* env_var = "OPENAI_API_KEY";
-    static constexpr const char* default_base_url = "https://api.openai.com/v1";
+  static constexpr const char* env_var = "OPENAI_API_KEY";
+  static constexpr const char* default_base_url = "https://api.openai.com/v1";
 };
 
 using OpenAIProviderSettings = OpenAiResponsesPresetSettings<OpenAITag>;
 
 class OpenAIProvider {
-    public:
-    explicit OpenAIProvider(OpenAIProviderSettings settings = {})
-        : settings_(settings), preset_(std::move(settings)) {}
+public:
+  explicit OpenAIProvider(OpenAIProviderSettings settings = {})
+      : settings_(settings), preset_(std::move(settings)) {}
 
-    [[nodiscard]] LanguageModel operator()(std::string model_id) const
-    {
-        return preset_(std::move(model_id));
-    }
+  [[nodiscard]] LanguageModel operator()(std::string model_id) const {
+    return preset_(std::move(model_id));
+  }
 
-    [[nodiscard]] LanguageModel operator()(std::string model_id,
-                                           std::unique_ptr<HttpTransport> transport) const
-    {
-        return preset_(std::move(model_id), std::move(transport));
-    }
+  [[nodiscard]] LanguageModel operator()(std::string model_id,
+                                         std::unique_ptr<HttpTransport> transport) const {
+    return preset_(std::move(model_id), std::move(transport));
+  }
 
-    [[nodiscard]] EmbeddingModel
-    embedding_model(std::string model_id,
-                    std::optional<std::size_t> dimensions = std::nullopt) const
-    {
-        auto api_key = detail::env_or(settings_.api_key, OpenAITag::env_var);
-        auto client = std::make_shared<detail::openai::EmbeddingClient>(
-            std::move(api_key), std::move(model_id), settings_.base_url, dimensions);
-        return EmbeddingModel{[client](const std::vector<std::string>& inputs) {
-            return client->embed_many(inputs);
-        }};
-    }
+  [[nodiscard]] EmbeddingModel
+  embedding_model(std::string model_id,
+                  std::optional<std::size_t> dimensions = std::nullopt) const {
+    auto api_key = detail::env_or(settings_.api_key, OpenAITag::env_var);
+    auto client = std::make_shared<detail::openai::EmbeddingClient>(
+        std::move(api_key), std::move(model_id), settings_.base_url, dimensions);
+    return EmbeddingModel{
+        [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
+  }
 
-    private:
-    OpenAIProviderSettings settings_;
-    detail::OpenAiResponsesPresetProvider<OpenAITag> preset_;
+private:
+  OpenAIProviderSettings settings_;
+  detail::OpenAiResponsesPresetProvider<OpenAITag> preset_;
 };
 
-[[nodiscard]] inline OpenAIProvider create_openai(OpenAIProviderSettings settings = {})
-{
-    return OpenAIProvider{std::move(settings)};
+[[nodiscard]] inline OpenAIProvider create_openai(OpenAIProviderSettings settings = {}) {
+  return OpenAIProvider{std::move(settings)};
 }
 
 inline OpenAIProvider openai{};

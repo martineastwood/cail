@@ -8,15 +8,17 @@ namespace test {
 
 void test_foundry_provider() {
   auto transport = std::make_unique<StubTransport>();
-  auto *stub = transport.get();
+  auto* stub = transport.get();
   const cail::FoundryProvider provider = cail::create_foundry({
       .api_key = "test-foundry-key",
   });
-  const auto model = provider(cail::FoundryDeployment{
-      .endpoint = "https://example.test/openai/"
-                  "responses?api-version=2025-04-01-preview",
-      .deployment = "deployment-a",
-  }, std::move(transport));
+  const auto model = provider(
+      cail::FoundryDeployment{
+          .endpoint = "https://example.test/openai/"
+                      "responses?api-version=2025-04-01-preview",
+          .deployment = "deployment-a",
+      },
+      std::move(transport));
   const auto response = model.generate(cail::GenerationRequest{
       .messages = {cail::Message{
           .role = cail::MessageRole::user,
@@ -30,19 +32,17 @@ void test_foundry_provider() {
   check(stub->request.headers.size() >= 2 &&
             stub->request.headers[0].value == "Bearer test-foundry-key",
         "Foundry authenticates with a Bearer API key");
-  check(stub->request.body.find("\"model\":\"deployment-a\"") !=
-                std::string::npos &&
-            stub->request.body.find("Reply with exactly OK.") !=
-                std::string::npos,
+  check(stub->request.body.find("\"model\":\"deployment-a\"") != std::string::npos &&
+            stub->request.body.find("Reply with exactly OK.") != std::string::npos,
         "Foundry requests the deployment model with the prompt");
 }
 
 void test_foundry_env_fallback() {
-  const char *previous = std::getenv("AZURE_FOUNDRY_API_KEY");
+  const char* previous = std::getenv("AZURE_FOUNDRY_API_KEY");
   const std::string saved = previous == nullptr ? "" : previous;
   setenv("AZURE_FOUNDRY_API_KEY", "env-foundry-key", 1);
   auto transport = std::make_unique<StubTransport>();
-  auto *stub = transport.get();
+  auto* stub = transport.get();
   const auto model = cail::create_foundry()(
       cail::FoundryDeployment{
           .endpoint = "https://example.test/openai/responses?api-version=1",
@@ -61,7 +61,7 @@ void test_foundry_env_fallback() {
     unsetenv("AZURE_FOUNDRY_API_KEY");
   }
   check(response.has_value(), "Foundry reads the API key from the environment");
-  check(stub->request.headers.size() >= 1 &&
+  check(!stub->request.headers.empty() &&
             stub->request.headers[0].value == "Bearer env-foundry-key",
         "Foundry falls back to AZURE_FOUNDRY_API_KEY");
 }
@@ -79,14 +79,13 @@ void test_foundry_missing_endpoint() {
       }},
   });
   check(!response, "Foundry rejects an empty deployment endpoint");
-  check(!response &&
-            response.error().code == cail::ErrorCode::invalid_configuration,
+  check(!response && response.error().code == cail::ErrorCode::invalid_configuration,
         "Foundry maps missing endpoint to invalid configuration");
 }
 
 void test_foundry_stream() {
   auto transport = std::make_unique<StubTransport>();
-  auto *stub = transport.get();
+  auto* stub = transport.get();
   stub->chunks = {
       "event: response.output_text.delta\ndata: "
       "{\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
@@ -97,22 +96,21 @@ void test_foundry_stream() {
   };
   const auto model = cail::create_foundry({
       .api_key = "test-foundry-key",
-  })(cail::FoundryDeployment{
-      .endpoint = "https://example.test/openai/responses?api-version=1",
-      .deployment = "deployment-a",
-  }, std::move(transport));
+  })(
+      cail::FoundryDeployment{
+          .endpoint = "https://example.test/openai/responses?api-version=1",
+          .deployment = "deployment-a",
+      },
+      std::move(transport));
   std::string streamed;
-  const auto response = model.stream(
-      "hello",
-      [&](const cail::StreamEvent &event) {
-        if (const auto *delta = std::get_if<cail::TextDelta>(&event)) {
-          streamed += delta->text;
-        }
-      });
+  const auto response = model.stream("hello", [&](const cail::StreamEvent& event) {
+    if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+      streamed += delta->text;
+    }
+  });
   check(response.has_value(), "Foundry streams a generation response");
   check(streamed == "Hi", "Foundry forwards streamed text deltas");
-  check(stub->request.headers.size() >= 3 &&
-            stub->request.headers[2].value == "text/event-stream",
+  check(stub->request.headers.size() >= 3 && stub->request.headers[2].value == "text/event-stream",
         "Foundry requests an SSE stream");
 }
 

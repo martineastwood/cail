@@ -53,28 +53,27 @@ public:
   int send_count{};
   int stream_count{};
 
-  [[nodiscard]] cail::Result<cail::HttpResponse>
-  send(const cail::HttpRequest &value) override {
+  [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& value) override {
     ++send_count;
     request = value;
     return response;
   }
 
-  [[nodiscard]] cail::Result<cail::HttpResponse>
-  stream(const cail::HttpRequest &value, const cail::HttpDataHandler &on_data,
-         std::stop_token stop) override {
+  [[nodiscard]] cail::Result<cail::HttpResponse> stream(const cail::HttpRequest& value,
+                                                        const cail::HttpDataHandler& on_data,
+                                                        std::stop_token stop) override {
     ++stream_count;
     request = value;
-    for (const auto &chunk : chunks) {
+    for (const auto& chunk : chunks) {
       if (stop.stop_requested()) {
-        return std::unexpected(cail::Error{.code = cail::ErrorCode::cancelled,
-                                           .message = "Cancelled."});
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::cancelled, .message = "Cancelled."});
       }
       on_data(chunk);
     }
     if (stop.stop_requested()) {
-      return std::unexpected(cail::Error{.code = cail::ErrorCode::cancelled,
-                                         .message = "Cancelled."});
+      return std::unexpected(
+          cail::Error{.code = cail::ErrorCode::cancelled, .message = "Cancelled."});
     }
     return response;
   }
@@ -86,7 +85,7 @@ public:
       : responses_(std::move(responses)) {}
 
   [[nodiscard]] cail::Result<cail::GenerationResponse>
-  generate(const cail::GenerationRequest &request) const {
+  generate(const cail::GenerationRequest& request) const {
     requests.push_back(request);
     if (responses_.empty()) {
       return std::unexpected(cail::Error{

@@ -31,11 +31,9 @@ void test_opencode_provider() {
     }
     std::unreachable();
   };
-  const auto expected_endpoint = [](OpenCodeService service,
-                                    OpenCodeApiFamily family) {
-    const std::string root = service == OpenCodeService::zen
-                                 ? "https://opencode.ai/zen/v1"
-                                 : "https://opencode.ai/zen/go/v1";
+  const auto expected_endpoint = [](OpenCodeService service, OpenCodeApiFamily family) {
+    const std::string root = service == OpenCodeService::zen ? "https://opencode.ai/zen/v1"
+                                                             : "https://opencode.ai/zen/go/v1";
     switch (family) {
     case OpenCodeApiFamily::chat_completions:
       return root + "/chat/completions";
@@ -48,10 +46,11 @@ void test_opencode_provider() {
     }
     std::unreachable();
   };
-  const auto header_value = [](const cail::HttpRequest &request,
-                               std::string_view name) {
-    for (const auto &header : request.headers) {
-      if (header.name == name) return header.value;
+  const auto header_value = [](const cail::HttpRequest& request, std::string_view name) {
+    for (const auto& header : request.headers) {
+      if (header.name == name) {
+        return header.value;
+      }
     }
     return std::string{};
   };
@@ -59,7 +58,7 @@ void test_opencode_provider() {
   for (const auto service : services) {
     for (const auto family : families) {
       auto transport = std::make_unique<StubTransport>();
-      auto *stub = transport.get();
+      auto* stub = transport.get();
       stub->response.body = family_response(family);
       const auto model = cail::create_opencode({
           .api_key = "opencode-key",
@@ -76,16 +75,13 @@ void test_opencode_provider() {
             "OpenCode routes through the selected protocol adapter");
       check(stub->request.url == expected_endpoint(service, family),
             "OpenCode selects the endpoint from service and API family");
-      const auto &model_location = family == OpenCodeApiFamily::gemini
-                                       ? stub->request.url
-                                       : stub->request.body;
+      const auto& model_location =
+          family == OpenCodeApiFamily::gemini ? stub->request.url : stub->request.body;
       check(model_location.find("model-x") != std::string::npos,
             "OpenCode passes the selected model ID through unchanged");
-      check(header_value(stub->request, "Authorization") ==
-                "Bearer opencode-key",
+      check(header_value(stub->request, "Authorization") == "Bearer opencode-key",
             "OpenCode authenticates every protocol with a Bearer key");
-      check(header_value(stub->request, "x-opencode-session") ==
-                "caller-session-17",
+      check(header_value(stub->request, "x-opencode-session") == "caller-session-17",
             "OpenCode uses the caller session ID in its required header");
       if (family == OpenCodeApiFamily::gemini) {
         check(header_value(stub->request, "x-goog-api-key").empty(),
@@ -105,17 +101,23 @@ void test_opencode_provider() {
     case OpenCodeApiFamily::responses:
       return std::vector<std::string>{
           "event: response.output_text.delta\ndata: {\"delta\":\"Hi\"}\n\n",
-          "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hi\"}]}]}}\n\n",
+          "event: response.completed\ndata: "
+          "{\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{"
+          "\"type\":\"output_text\",\"text\":\"Hi\"}]}]}}\n\n",
       };
     case OpenCodeApiFamily::anthropic_messages:
       return std::vector<std::string>{
-          "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+          "data: "
+          "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\","
+          "\"text\":\"Hi\"}}\n\n",
           "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
           "data: {\"type\":\"message_stop\"}\n\n",
       };
     case OpenCodeApiFamily::gemini:
       return std::vector<std::string>{
-          "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n",
+          "data: "
+          "{\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}"
+          "]}\n\n",
       };
     }
     std::unreachable();
@@ -123,7 +125,7 @@ void test_opencode_provider() {
 
   for (const auto family : families) {
     auto transport = std::make_unique<StubTransport>();
-    auto *stub = transport.get();
+    auto* stub = transport.get();
     stub->response.body.clear();
     stub->chunks = stream_chunks(family);
     const auto model = cail::create_opencode({
@@ -138,17 +140,16 @@ void test_opencode_provider() {
             }},
             .session_id = "caller-stream-session",
         },
-        [](const cail::StreamEvent &) {});
+        [](const cail::StreamEvent&) {});
     check(response.has_value(), "OpenCode streams through the selected protocol adapter");
     check(stub->stream_count == 1,
           "OpenCode sends streaming requests through the streaming transport");
-    check(header_value(stub->request, "x-opencode-session") ==
-              "caller-stream-session",
+    check(header_value(stub->request, "x-opencode-session") == "caller-stream-session",
           "OpenCode adds the caller session header to streams");
   }
 
   auto transport = std::make_unique<StubTransport>();
-  auto *stub = transport.get();
+  auto* stub = transport.get();
   const auto model = cail::create_opencode({
       .api_key = "opencode-key",
       .service = OpenCodeService::zen,
@@ -159,29 +160,25 @@ void test_opencode_provider() {
           .content = {cail::TextPart{.text = "Say hello."}},
       }},
   });
-  check(!missing_session &&
-            missing_session.error().code == cail::ErrorCode::invalid_configuration,
+  check(!missing_session && missing_session.error().code == cail::ErrorCode::invalid_configuration,
         "OpenCode rejects a request without a caller session ID");
-  check(stub->send_count == 0,
-        "OpenCode validates the session ID before sending a request");
+  check(stub->send_count == 0, "OpenCode validates the session ID before sending a request");
 
   auto helper_transport = std::make_unique<StubTransport>();
-  auto *helper_stub = helper_transport.get();
+  auto* helper_stub = helper_transport.get();
   helper_stub->response.body =
       R"({"choices":[{"index":0,"finish_reason":"stop","message":{"content":"Hello"}}]})";
   const auto helper_model = cail::create_opencode({
       .api_key = "opencode-key",
       .service = OpenCodeService::zen,
-  })("model-x", OpenCodeApiFamily::chat_completions,
-     std::move(helper_transport));
+  })("model-x", OpenCodeApiFamily::chat_completions, std::move(helper_transport));
   const auto helper_response = cail::generate_text({
       .model = helper_model,
       .prompt = "Say hello.",
       .session_id = "caller-helper-session",
   });
   check(helper_response &&
-            header_value(helper_stub->request, "x-opencode-session") ==
-                "caller-helper-session",
+            header_value(helper_stub->request, "x-opencode-session") == "caller-helper-session",
         "generate_text forwards the caller session ID");
 }
 
