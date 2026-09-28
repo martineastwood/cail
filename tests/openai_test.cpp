@@ -154,9 +154,9 @@ void test_http_error_mapping() {
   auto transport = std::make_unique<StubTransport>();
   transport->response = cail::HttpResponse{
       .status_code = 401,
+      .headers = {{.name = "X-Request-Id", .value = "req_123"}},
       .body =
           R"({"error":{"message":"bad key","code":"invalid_api_key","type":"authentication_error"}})",
-      .headers = {{.name = "X-Request-Id", .value = "req_123"}},
   };
   cail::detail::openai::Client client({.api_key = "test-key", .model = "test-model"},
                                       std::move(transport));

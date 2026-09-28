@@ -46,12 +46,17 @@ jobs:
           - name: Linux (gcc)
             os: ubuntu-24.04
             cxx: g++
+            packages: ""
+          # Clang 18 on Ubuntu cannot use libstdc++'s C++23 <expected>, which
+          # Glaze and CAIL both need, so the matrix uses Clang 20.
           - name: Linux (clang)
             os: ubuntu-24.04
-            cxx: clang++
+            cxx: clang++-20
+            packages: clang-20
           - name: macOS (AppleClang)
             os: macos-15
             cxx: clang++
+            packages: ""
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -60,10 +65,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build clang libssl-dev
+          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev ${{ matrix.packages }}
 
-      - name: Install CMake
-        run: pip install "cmake==$CMAKE_VERSION"
+      - name: Install CMake and clang-format
+        run: |
+          pip install "cmake==$CMAKE_VERSION" "clang-format==$CLANG_FORMAT_VERSION"
 
       - name: Restore dependency checkout
         uses: actions/cache@v4
