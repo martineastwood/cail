@@ -1,0 +1,25 @@
+{
+  "name": "cail",
+  "version": "0.1.4",
+  "description": "A typed C++ SDK for LLM providers, with a provider-neutral model and generation API",
+  "homepage": "https://github.com/martineastwood/cail",
+  "license": "MIT",
+  "supports": "!uwp",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    {
+      "name": "glaze",
+      "features": [
+        "ssl"
+      ]
+    },
+    "magic-enum"
+  ]
+}
