@@ -35,18 +35,20 @@ template <typename T>
   return status_code < 200 || status_code >= 300;
 }
 
+struct HttpStatusProviderError {
+  std::string message;
+  std::optional<std::string> code;
+  std::optional<std::string> type;
+  std::optional<std::string> status;
+};
+
+struct HttpStatusErrorBody {
+  std::optional<HttpStatusProviderError> error;
+};
+
 // Parses provider JSON error bodies with `message` plus optional `code`/`type`/`status`.
 [[nodiscard]] inline Error http_status_error_from_json_body(const HttpResponse& response) {
-  struct ProviderError {
-    std::string message;
-    std::optional<std::string> code;
-    std::optional<std::string> type;
-    std::optional<std::string> status;
-  };
-  struct ErrorBody {
-    std::optional<ProviderError> error;
-  };
-  ErrorBody body;
+  HttpStatusErrorBody body;
   const auto parsed = glz::read<glz::opts{.error_on_unknown_keys = false}>(body, response.body);
   return Error{
       .code = ErrorCode::http_status,
