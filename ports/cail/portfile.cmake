@@ -2,7 +2,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO martineastwood/cail
     REF "v${VERSION}"
-    SHA512 a3d8ea1162e7c0a5c6e2fae03c632fd93ef12cc1a8fffaac3cc2011bce4dec495e64d490bd899e6f0c591e6cc4026e4ba70facdf825631c4f7c3fd582d057407
+    SHA512 7ac6dbd4f7d97ad552c13cca7a738c4a3ac213903364061e36310fa3787f3a8360899ef8f63bb12dc25fb2c6c8e152ed7497332833c15d2f5d6c649dbda7dfd3
     HEAD_REF main
 )
 

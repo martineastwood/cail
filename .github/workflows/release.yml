@@ -24,7 +24,8 @@ jobs:
       - name: Install dependencies and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++ libssl-dev ninja-build python3-venv
+          sudo apt-get install -y --no-install-recommends clang-tidy-20 g++ libssl-dev ninja-build python3-venv
+          sudo ln -sf /usr/bin/clang-tidy-20 /usr/local/bin/clang-tidy
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
             cmake==3.31.10 clang-format==23.1.1
@@ -44,6 +45,9 @@ jobs:
         env:
           CXX: g++
         run: ./dev check
+
+      - name: Run clang-tidy
+        run: ./dev tidy
 
       - name: Create GitHub release
         env:

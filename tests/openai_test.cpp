@@ -12,7 +12,7 @@ void test_middleware_chain() {
   cail::detail::openai::Client client({.api_key = "test-key", .model = "test-model"},
                                       std::move(transport));
   std::vector<std::string> calls;
-  const auto middleware = [&](std::string name) {
+  const auto middleware = [&](const std::string& name) {
     return cail::GenerationMiddleware{
         .before_request =
             [&, name](cail::HttpRequest& request, const cail::MiddlewareContext& context) {
