@@ -58,7 +58,7 @@ jobs:
             cxx: clang++-20
             packages: clang-20
           - name: macOS (AppleClang)
-            os: macos-15
+            os: macos-26
             cxx: clang++
             packages: ""
     steps:
