@@ -4,6 +4,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/openai_embeddings.hpp>
 #include <cail/detail/openai_responses_wire.hpp>
 #include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
@@ -11,7 +12,6 @@
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
-#include <cail/openai_embeddings.hpp>
 
 #include <glaze/glaze.hpp>
 
@@ -576,11 +576,12 @@ public:
   [[nodiscard]] EmbeddingModel
   embedding_model(std::string model_id,
                   std::optional<std::size_t> dimensions = std::nullopt) const {
-    auto api_key = detail::env_or(settings_.api_key, OpenAITag::env_var);
-    auto client = std::make_shared<detail::openai::EmbeddingClient>(
-        std::move(api_key), std::move(model_id), settings_.base_url, dimensions);
-    return EmbeddingModel{
-        [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
+    return detail::make_embedding_model(detail::EmbeddingClientSettings{
+        .endpoint = settings_.base_url + "/embeddings",
+        .api_key = detail::env_or(settings_.api_key, OpenAITag::env_var),
+        .model = std::move(model_id),
+        .dimensions = dimensions,
+    });
   }
 
 private:

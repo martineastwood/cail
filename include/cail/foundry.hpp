@@ -2,10 +2,12 @@
 
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
+#include <cail/embedding_model.hpp>
 #include <cail/language_model.hpp>
 #include <cail/openai.hpp>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -50,6 +52,19 @@ public:
         },
         std::move(transport));
     return detail::language_model_from(client);
+  }
+
+  // Azure serves embeddings from the deployment's own URL, which includes the
+  // API version, so pass the full embeddings endpoint.
+  [[nodiscard]] EmbeddingModel
+  embedding_model(std::string model_id, std::string endpoint,
+                  std::optional<std::size_t> dimensions = std::nullopt) const {
+    return detail::make_embedding_model(detail::EmbeddingClientSettings{
+        .endpoint = std::move(endpoint),
+        .api_key = detail::env_or(settings_.api_key, FoundryTag::env_var),
+        .model = std::move(model_id),
+        .dimensions = dimensions,
+    });
   }
 
 private:

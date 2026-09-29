@@ -186,8 +186,14 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_gemini_tool_call examples/gemini_tool_call.cpp)
     target_link_libraries(cail_gemini_tool_call PRIVATE cail::cail)
 
+    add_executable(cail_gemini_embed examples/gemini_embed.cpp)
+    target_link_libraries(cail_gemini_embed PRIVATE cail::cail)
+
     add_executable(cail_mistral_prompt examples/mistral_prompt.cpp)
     target_link_libraries(cail_mistral_prompt PRIVATE cail::cail)
+
+    add_executable(cail_mistral_embed examples/mistral_embed.cpp)
+    target_link_libraries(cail_mistral_embed PRIVATE cail::cail)
 
     add_executable(cail_hyper_prompt examples/hyper_prompt.cpp)
     target_link_libraries(cail_hyper_prompt PRIVATE cail::cail)
@@ -219,6 +225,7 @@ if(BUILD_TESTING)
     cail_add_test(core)
     cail_add_test(openai)
     cail_add_test(chat_completions)
+    cail_add_test(embeddings)
     cail_add_test(foundry)
     cail_add_test(opencode)
     cail_add_test(memory)

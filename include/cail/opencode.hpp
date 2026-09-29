@@ -8,6 +8,7 @@
 #include <cail/openai.hpp>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -165,6 +166,19 @@ public:
     }
     }
     std::unreachable();
+  }
+
+  [[nodiscard]] EmbeddingModel
+  embedding_model(std::string model_id,
+                  std::optional<std::size_t> dimensions = std::nullopt) const {
+    const auto root = settings_.base_url.empty() ? detail::opencode::base_url(settings_.service)
+                                                 : settings_.base_url;
+    return detail::make_embedding_model(detail::EmbeddingClientSettings{
+        .endpoint = root + "/embeddings",
+        .api_key = detail::env_or(settings_.api_key, "OPENCODE_API_KEY"),
+        .model = std::move(model_id),
+        .dimensions = dimensions,
+    });
   }
 
 private:

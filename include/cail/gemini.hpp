@@ -7,6 +7,7 @@
 #include <cail/detail/http_context.hpp>
 #include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
+#include <cail/embedding_model.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
@@ -339,6 +340,118 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
   return {};
 }
 
+// Gemini has no OpenAI-style embeddings endpoint. A batch becomes POST
+// /models/{model}:batchEmbedContents with one EmbedContentRequest per input.
+struct EmbedPart {
+  std::string text;
+};
+struct EmbedContent {
+  std::vector<EmbedPart> parts;
+};
+struct EmbedContentRequest {
+  std::string model;
+  EmbedContent content;
+  std::optional<std::size_t> outputDimensionality;
+};
+struct BatchEmbedContentsRequest {
+  std::vector<EmbedContentRequest> requests;
+};
+struct ContentEmbedding {
+  std::vector<float> values;
+};
+struct EmbeddingUsage {
+  std::optional<std::size_t> promptTokenCount;
+};
+struct BatchEmbedContentsResponse {
+  std::vector<ContentEmbedding> embeddings;
+  std::optional<EmbeddingUsage> usageMetadata;
+};
+
+class EmbeddingClient {
+public:
+  explicit EmbeddingClient(
+      Config config, std::optional<std::size_t> dimensions = std::nullopt,
+      std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
+      : config_(std::move(config)), dimensions_(dimensions), transport_(std::move(transport)) {}
+
+  [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs) const {
+    if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
+        !transport_) {
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Gemini embeddings require an API key, model, base "
+                                              "URL, and transport."});
+    }
+    BatchEmbedContentsRequest request;
+    for (const auto& input : inputs) {
+      request.requests.push_back(EmbedContentRequest{
+          .model = "models/" + model_id(),
+          .content = EmbedContent{.parts = {EmbedPart{.text = input}}},
+          .outputDimensionality = dimensions_,
+      });
+    }
+    auto encoded = to_json(request);
+    if (!encoded)
+      return std::unexpected(encoded.error());
+    HttpRequest http{.url = config_.base_url + "/models/" + model_id() + ":batchEmbedContents",
+                     .headers = config_.headers,
+                     .body = std::move(*encoded)};
+    if (config_.api_key_header.empty())
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Gemini requires an API key header name."});
+    http.headers.push_back(
+        {.name = config_.api_key_header, .value = config_.api_key_prefix + config_.api_key});
+    http.headers.push_back({.name = "Content-Type", .value = "application/json"});
+    cail::detail::append_session_header(http.headers, config_.request_session_header,
+                                        config_.model);
+    auto response = transport_->send(http);
+    if (!response)
+      return std::unexpected(response.error());
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<EmbeddingBatch>(std::move(error), *response);
+    };
+    if (is_http_error_status(response->status_code)) {
+      return context(http_status_error_from_json_body(*response));
+    }
+    BatchEmbedContentsResponse body;
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(body, response->body);
+        error) {
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = glz::format_error(error, response->body)});
+    }
+    if (body.embeddings.size() != inputs.size()) {
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = "Gemini returned an incomplete embedding batch."});
+    }
+    EmbeddingBatch result{.embeddings = std::vector<Embedding>(inputs.size()),
+                          .model = config_.model,
+                          .input_tokens = body.usageMetadata ? body.usageMetadata->promptTokenCount
+                                                             : std::nullopt};
+    for (std::size_t index = 0; index < body.embeddings.size(); ++index) {
+      auto& values = body.embeddings[index].values;
+      if (values.empty() || (result.dimensions && values.size() != result.dimensions) ||
+          (dimensions_ && values.size() != *dimensions_)) {
+        return context(Error{.code = ErrorCode::provider_response,
+                             .message = "Gemini returned an embedding with an invalid dimension."});
+      }
+      result.dimensions = values.size();
+      result.embeddings[index] = Embedding{
+          .values = std::move(values), .model = config_.model, .dimensions = result.dimensions};
+    }
+    return result;
+  }
+
+private:
+  // The URL template uses "models/{model}", so accept an ID with or without the prefix.
+  [[nodiscard]] std::string model_id() const {
+    return config_.model.starts_with("models/") ? config_.model.substr(7) : config_.model;
+  }
+
+  Config config_;
+  std::optional<std::size_t> dimensions_;
+  std::unique_ptr<HttpTransport> transport_;
+};
+
 class Client {
 public:
   explicit Client(Config config,
@@ -526,6 +639,21 @@ public:
                  std::stop_token stop) { return client->stream(request, handler, stop); },
         AdapterCapabilities{
             .image_input = true, .tools = true, .structured_output = true, .reasoning = true}};
+  }
+
+  [[nodiscard]] EmbeddingModel
+  embedding_model(std::string model_id,
+                  std::optional<std::size_t> dimensions = std::nullopt) const {
+    auto client = std::make_shared<detail::gemini::EmbeddingClient>(
+        detail::gemini::Config{
+            .api_key = detail::env_or(settings_.api_key, "GEMINI_API_KEY"),
+            .model = std::move(model_id),
+            .base_url = settings_.base_url,
+            .headers = settings_.headers,
+        },
+        dimensions);
+    return EmbeddingModel{
+        [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
   }
 
 private:

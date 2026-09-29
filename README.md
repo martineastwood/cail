@@ -34,7 +34,8 @@ supports:
 - Structured outputs decoded into your C++ types
 - Function tools with typed argument decoding and an automatic tool loop
 - Agents that bundle a model, standing instructions, and tools
-- Embeddings and image inputs where the provider supports them
+- Embeddings from any provider
+- Image inputs where the provider supports them
 
 CAIL is header-only and targets C++23.
 
@@ -381,8 +382,8 @@ encode it for the selected provider.
 
 ## Create embeddings
 
-Use an embedding model when you need vectors for search or similarity. With
-`OPENAI_API_KEY` set, you can embed one text or a batch:
+Use an embedding model when you need vectors for search or similarity. Build one from any
+provider, then embed one text or a batch:
 
 ```cpp
 auto model = cail::openai.embedding_model("text-embedding-3-small");
@@ -394,12 +395,31 @@ if (batch) {
 }
 ```
 
+Every provider exposes an `embedding_model`. Pass the embedding model ID your provider
+documents, the same way you pass a chat model ID to the provider itself. CAIL ships no
+model catalog, so the lookup stays with you.
+
+The second argument is optional. Pass a positive dimension count when you want shorter
+vectors from a model that supports them:
+
+```cpp
+auto model = cail::openai.embedding_model("text-embedding-3-small", 512);
+```
+
+Use the same model and dimensions for vectors you compare or store together.
+
 Each vector includes the returned model ID and dimension count. Batch results follow
 input order even if the provider returns indexed vectors out of order.
-`batch->input_tokens` is present when the provider reports usage. For OpenAI's
-`text-embedding-3` models, pass a positive dimension count as the second argument to
-`embedding_model` when you want shorter vectors. Use the same model and dimensions for
-vectors you compare or store together.
+`batch->input_tokens` is present when the provider reports usage.
+
+Embeddings follow the base URL you configured for the provider, so pointing a provider at
+a gateway or proxy moves both chat and embeddings. Servers that need no API key, such as
+`cail::local`, send no `Authorization` header. Azure Foundry is configured per deployment,
+so pass the embeddings URL explicitly:
+
+```cpp
+auto model = cail::foundry.embedding_model("text-embedding-3-small", embeddings_url);
+```
 
 ## Providers
 
@@ -776,8 +796,8 @@ Set the provider's API key in your environment, then run the binaries from `./bu
 | OpenAI | `OPENAI_API_KEY` | `cail_openai_prompt`, `cail_openai_stream`, `cail_openai_generate_object`, `cail_openai_tool_call`, `cail_openai_agent`, `cail_openai_embed`, `cail_openai_create` |
 | OpenRouter | `OPENROUTER_API_KEY` | `cail_openrouter_prompt`, `cail_openrouter_stream`, `cail_openrouter_object` |
 | Anthropic | `ANTHROPIC_API_KEY` | `cail_anthropic_prompt`, `cail_anthropic_stream`, `cail_anthropic_object`, `cail_anthropic_tool_call` |
-| Gemini | `GEMINI_API_KEY` | `cail_gemini_prompt`, `cail_gemini_stream`, `cail_gemini_object`, `cail_gemini_tool_call` |
-| Mistral | `MISTRAL_API_KEY` | `cail_mistral_prompt` |
+| Gemini | `GEMINI_API_KEY` | `cail_gemini_prompt`, `cail_gemini_stream`, `cail_gemini_object`, `cail_gemini_tool_call`, `cail_gemini_embed` |
+| Mistral | `MISTRAL_API_KEY` | `cail_mistral_prompt`, `cail_mistral_embed` |
 | Charm Hyper | `HYPER_API_KEY` | `cail_hyper_prompt` |
 | Azure Foundry | `AZURE_FOUNDRY_API_KEY` | `cail_foundry_prompt` |
 | OpenCode | `OPENCODE_API_KEY` | `cail_opencode_prompt` |

@@ -7,15 +7,17 @@
 
 #include <glaze/glaze.hpp>
 
-#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace cail::detail::openai {
+namespace cail::detail {
 
+// The OpenAI embeddings wire format. OpenAI, Mistral, OpenRouter, Ollama Cloud,
+// and most self-hosted servers accept `{"model", "input"}` at a dedicated URL,
+// so one client serves all of them.
 struct EmbeddingRequestBody {
   std::string model;
   std::vector<std::string> input;
@@ -38,29 +40,39 @@ struct EmbeddingResponseBody {
   std::optional<EmbeddingUsage> usage;
 };
 
+struct EmbeddingClientSettings {
+  // Full embeddings URL, for example "https://api.openai.com/v1/embeddings".
+  std::string endpoint;
+  std::string api_key;
+  std::string model;
+  std::optional<std::size_t> dimensions;
+  std::unique_ptr<HttpTransport> transport = make_default_http_transport();
+};
+
 class EmbeddingClient {
 public:
-  EmbeddingClient(std::string api_key, std::string model, std::string base_url,
-                  std::optional<std::size_t> dimensions = std::nullopt,
-                  std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
-      : api_key_(std::move(api_key)), model_(std::move(model)), base_url_(std::move(base_url)),
-        dimensions_(dimensions), transport_(std::move(transport)) {}
+  explicit EmbeddingClient(EmbeddingClientSettings settings = {})
+      : settings_(std::move(settings)) {}
 
   [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs) const {
-    if (api_key_.empty() || model_.empty() || base_url_.empty() || !transport_ ||
-        (dimensions_ && *dimensions_ == 0)) {
+    if (settings_.model.empty() || settings_.endpoint.empty() || !settings_.transport ||
+        (settings_.dimensions && *settings_.dimensions == 0)) {
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                   .message = "OpenAI embeddings require an API key, model, base "
-                                              "URL, transport, and positive dimensions."});
+                                   .message = "Embeddings require a model, endpoint, transport, "
+                                              "and positive dimensions."});
     }
-    auto encoded =
-        to_json(EmbeddingRequestBody{.model = model_, .input = inputs, .dimensions = dimensions_});
+    auto encoded = to_json(EmbeddingRequestBody{
+        .model = settings_.model, .input = inputs, .dimensions = settings_.dimensions});
     if (!encoded)
       return std::unexpected(encoded.error());
-    auto response = transport_->send(HttpRequest{
-        .url = base_url_ + "/embeddings",
-        .headers = {{.name = "Authorization", .value = "Bearer " + api_key_},
-                    {.name = "Content-Type", .value = "application/json"}},
+    std::vector<HttpHeader> headers;
+    if (!settings_.api_key.empty()) {
+      headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
+    }
+    headers.push_back({.name = "Content-Type", .value = "application/json"});
+    auto response = settings_.transport->send(HttpRequest{
+        .url = settings_.endpoint,
+        .headers = std::move(headers),
         .body = std::move(*encoded),
     });
     if (!response)
@@ -80,7 +92,7 @@ public:
     }
     if (body.model.empty() || body.data.size() != inputs.size()) {
       return context(Error{.code = ErrorCode::provider_response,
-                           .message = "OpenAI returned an incomplete embedding batch."});
+                           .message = "The embeddings endpoint returned an incomplete batch."});
     }
     EmbeddingBatch result{.embeddings = std::vector<Embedding>(inputs.size()),
                           .model = body.model,
@@ -90,10 +102,11 @@ public:
     for (auto& item : body.data) {
       if (item.index >= inputs.size() || seen[item.index] || item.embedding.empty() ||
           (result.dimensions && item.embedding.size() != result.dimensions) ||
-          (dimensions_ && item.embedding.size() != *dimensions_)) {
-        return context(
-            Error{.code = ErrorCode::provider_response,
-                  .message = "OpenAI returned an invalid embedding index or vector dimension."});
+          (settings_.dimensions && item.embedding.size() != *settings_.dimensions)) {
+        return context(Error{.code = ErrorCode::provider_response,
+                             .message =
+                                 "The embeddings endpoint returned an invalid index or vector "
+                                 "dimension."});
       }
       seen[item.index] = true;
       result.dimensions = item.embedding.size();
@@ -105,11 +118,13 @@ public:
   }
 
 private:
-  std::string api_key_;
-  std::string model_;
-  std::string base_url_;
-  std::optional<std::size_t> dimensions_;
-  std::unique_ptr<HttpTransport> transport_;
+  EmbeddingClientSettings settings_;
 };
 
-} // namespace cail::detail::openai
+[[nodiscard]] inline EmbeddingModel make_embedding_model(EmbeddingClientSettings settings) {
+  auto client = std::make_shared<EmbeddingClient>(std::move(settings));
+  return EmbeddingModel{
+      [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
+}
+
+} // namespace cail::detail

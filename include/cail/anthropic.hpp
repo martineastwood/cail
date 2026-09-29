@@ -5,9 +5,11 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
+#include <cail/detail/openai_embeddings.hpp>
 #include <cail/detail/request_headers.hpp>
 #include <cail/detail/sse.hpp>
 #include <cail/detail/strict_schema.hpp>
+#include <cail/embedding_model.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
@@ -701,6 +703,17 @@ public:
                  std::stop_token stop) { return client->stream(request, handler, stop); },
         AdapterCapabilities{
             .image_input = true, .tools = true, .structured_output = true, .reasoning = true}};
+  }
+
+  [[nodiscard]] EmbeddingModel
+  embedding_model(std::string model_id,
+                  std::optional<std::size_t> dimensions = std::nullopt) const {
+    return detail::make_embedding_model(detail::EmbeddingClientSettings{
+        .endpoint = settings_.base_url + "/embeddings",
+        .api_key = detail::env_or(settings_.api_key, "ANTHROPIC_API_KEY"),
+        .model = std::move(model_id),
+        .dimensions = dimensions,
+    });
   }
 
 private:
