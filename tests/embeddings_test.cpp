@@ -3,6 +3,7 @@
 #include <cail/anthropic.hpp>
 #include <cail/detail/chat_completions_preset.hpp>
 #include <cail/detail/openai_embeddings.hpp>
+#include <cail/embedding_store.hpp>
 #include <cail/foundry.hpp>
 #include <cail/gemini.hpp>
 #include <cail/hyper.hpp>
@@ -13,6 +14,7 @@
 #include <cail/opencode.hpp>
 #include <cail/openrouter.hpp>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -235,6 +237,100 @@ void test_gemini_embeddings() {
         "the Gemini provider offers an embedding model");
 }
 
+// "cat" and "feline" share a direction, "kitten" is close, "car" is orthogonal.
+[[nodiscard]] std::vector<float> store_vector_for(const std::string& text) {
+  if (text == "car") {
+    return {0.0F, 1.0F};
+  }
+  if (text == "kitten") {
+    return {0.9F, 0.1F};
+  }
+  return {1.0F, 0.0F};
+}
+
+void test_embedding_store_search() {
+  std::size_t calls = 0;
+  cail::EmbeddingStore store(cail::EmbeddingModel{
+      [&calls](const std::vector<std::string>& inputs) -> cail::Result<cail::EmbeddingBatch> {
+        ++calls;
+        cail::EmbeddingBatch batch{.model = "stub", .dimensions = 2};
+        for (const auto& input : inputs) {
+          batch.embeddings.push_back(
+              cail::Embedding{.values = store_vector_for(input), .model = "stub", .dimensions = 2});
+        }
+        return batch;
+      }});
+
+  check(store.empty(), "a new embedding store is empty");
+
+  const auto added = store.add({
+      {.id = "cat", .text = "cat"},
+      {.id = "kitten", .text = "kitten"},
+      {.id = "car", .text = "car"},
+  });
+  check(added.has_value() && store.size() == 3, "adding documents stores them");
+  check(calls == 1, "adding documents embeds them in a single batch");
+
+  const auto results = store.search("feline", 2);
+  check(results.has_value() && results->size() == 2, "search returns at most top_k results");
+  if (!results || results->size() != 2) {
+    return;
+  }
+  check(results->at(0).document.id == "cat" && results->at(1).document.id == "kitten",
+        "search orders documents by cosine similarity");
+  check(std::abs(results->at(0).score - 1.0F) < 1e-6F &&
+            results->at(0).score > results->at(1).score,
+        "search reports the cosine similarity score");
+  check(calls == 2, "search embeds the query once");
+
+  const auto all = store.search("feline", 10);
+  check(all.has_value() && all->size() == 3 && all->back().document.id == "car",
+        "a top_k larger than the store returns every document, worst last");
+}
+
+void test_embedding_store_empty_and_errors() {
+  std::size_t calls = 0;
+  cail::EmbeddingModel model{
+      [&calls](const std::vector<std::string>&) -> cail::Result<cail::EmbeddingBatch> {
+        ++calls;
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::provider_response, .message = "boom"});
+      }};
+
+  cail::EmbeddingStore store(model);
+  const auto empty = store.search("anything");
+  check(empty.has_value() && empty->empty() && calls == 0,
+        "searching an empty store returns nothing without calling the model");
+
+  const auto added = store.add({{.id = "a", .text = "text"}});
+  check(!added && added.error().message == "boom" && store.empty(),
+        "adding documents propagates embedding errors and stores nothing");
+
+  const auto zero = store.search("anything", 0);
+  check(zero.has_value() && zero->empty(), "a top_k of zero returns no results");
+}
+
+void test_embedding_store_dimension_mismatch() {
+  bool first = true;
+  cail::EmbeddingStore store(cail::EmbeddingModel{
+      [&first](const std::vector<std::string>& inputs) -> cail::Result<cail::EmbeddingBatch> {
+        const std::size_t dimensions = first ? 2 : 3;
+        first = false;
+        cail::EmbeddingBatch batch{.model = "stub", .dimensions = dimensions};
+        for (std::size_t i = 0; i < inputs.size(); ++i) {
+          batch.embeddings.push_back(cail::Embedding{.values = std::vector<float>(dimensions, 1.0F),
+                                                     .model = "stub",
+                                                     .dimensions = dimensions});
+        }
+        return batch;
+      }});
+
+  check(store.add({{.id = "a", .text = "text"}}).has_value(), "a store accepts a document");
+  const auto results = store.search("query");
+  check(!results && results.error().code == cail::ErrorCode::invalid_configuration,
+        "search rejects a query whose dimensions do not match the stored documents");
+}
+
 } // namespace test
 
 int main() {
@@ -245,5 +341,8 @@ int main() {
   test::test_embedding_model_requires_one_vector();
   test::test_preset_embeddings_endpoints();
   test::test_gemini_embeddings();
+  test::test_embedding_store_search();
+  test::test_embedding_store_empty_and_errors();
+  test::test_embedding_store_dimension_mismatch();
   return test::failures == 0 ? 0 : 1;
 }

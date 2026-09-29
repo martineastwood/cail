@@ -150,6 +150,9 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_openai_embed examples/openai_embed.cpp)
     target_link_libraries(cail_openai_embed PRIVATE cail::cail)
 
+    add_executable(cail_openai_embed_store examples/openai_embed_store.cpp)
+    target_link_libraries(cail_openai_embed_store PRIVATE cail::cail)
+
     add_executable(cail_openrouter_prompt examples/openrouter_prompt.cpp)
     target_link_libraries(cail_openrouter_prompt PRIVATE cail::cail)
 

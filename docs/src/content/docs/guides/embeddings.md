@@ -59,11 +59,44 @@ Azure Foundry is configured per deployment, so pass the embeddings URL explicitl
 auto model = cail::foundry.embedding_model("text-embedding-3-small", embeddings_url);
 ```
 
+## Store and search embeddings
+
+Use `cail::EmbeddingStore` to search a small collection of documents by meaning. Add
+documents once, then search with a query string:
+
+```cpp
+cail::EmbeddingStore store(cail::openai.embedding_model("text-embedding-3-small"));
+store.add({
+    {.id = "apple", .text = "A red apple"},
+    {.id = "pear", .text = "A green pear"},
+    {.id = "banana", .text = "A yellow banana"},
+});
+
+auto results = store.search("A crunchy fruit", 2);
+if (results) {
+    for (const auto& result : *results) {
+        std::cout << result.document.id << ' ' << result.score << '\n';
+    }
+}
+```
+
+The store embeds the documents in one batch and keeps them in memory. Each `search` embeds
+the query and returns up to `top_k` documents (four by default), best match first. The
+`score` is the cosine similarity between the query and the document, from -1 to 1.
+
+`add` and `search` return an error rather than throwing, so check the result before you
+read it. Searching an empty store returns no results without calling the provider.
+
+The store compares every query against every document in memory, which is fast for small
+collections and needs no database. When your documents change, add the new ones and search
+again. For large collections or persistence across restarts, use a dedicated vector
+database and keep the model ID and dimension count alongside your vectors.
+
 ## Build and run the examples
 
 ```sh
-cmake --build build --target cail_openai_embed cail_gemini_embed cail_mistral_embed
-./build/cail_openai_embed
+cmake --build build --target cail_openai_embed cail_gemini_embed cail_mistral_embed cail_openai_embed_store
+./build/cail_openai_embed_store
 ```
 
 Set the matching environment variable first: `OPENAI_API_KEY`, `GEMINI_API_KEY`, or
@@ -71,5 +104,5 @@ Set the matching environment variable first: `OPENAI_API_KEY`, `GEMINI_API_KEY`,
 
 ## Next steps
 
-CAIL does not ship a vector store. Store the vectors you get back in whatever database or
-index you already use, and keep the model ID and dimension count alongside them.
+- [Providers](/guides/providers/) to configure an embedding model for each provider
+- [Advanced usage](/guides/advanced/) for middleware and per-request options

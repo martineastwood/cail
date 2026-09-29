@@ -35,6 +35,7 @@ supports:
 - Function tools with typed argument decoding and an automatic tool loop
 - Agents that bundle a model, standing instructions, and tools
 - Embeddings from any provider
+- An in-memory embedding store for search over small collections
 - Image inputs where the provider supports them
 
 CAIL is header-only and targets C++23.
@@ -420,6 +421,32 @@ so pass the embeddings URL explicitly:
 ```cpp
 auto model = cail::foundry.embedding_model("text-embedding-3-small", embeddings_url);
 ```
+
+### Search a small collection
+
+Use `cail::EmbeddingStore` when you want to search a handful of documents by meaning
+without a database. Add documents once, then search with a query string:
+
+```cpp
+cail::EmbeddingStore store(cail::openai.embedding_model("text-embedding-3-small"));
+store.add({
+    {.id = "apple", .text = "A red apple"},
+    {.id = "pear", .text = "A green pear"},
+});
+
+auto results = store.search("A crunchy fruit", 2);
+if (results) {
+    for (const auto& result : *results) {
+        std::cout << result.document.id << ' ' << result.score << '\n';
+    }
+}
+```
+
+`add` embeds the documents in one batch. `search` embeds the query and returns up to
+`top_k` documents (four by default), best match first, scored by cosine similarity. Both
+return an error rather than throwing. The store keeps everything in memory and compares
+each query against every document, so reach for a dedicated vector database when your
+collection grows.
 
 ## Providers
 
