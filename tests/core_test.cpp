@@ -148,7 +148,7 @@ void test_agent() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .instructions = "Be concise.",
       .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",

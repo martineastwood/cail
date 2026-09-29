@@ -131,7 +131,7 @@ void test_agent_memory() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .instructions = "Be concise.",
       .memory = memory,
@@ -177,7 +177,7 @@ void test_agent_memory_conversation_ids() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .memory = memory,
   });
@@ -207,7 +207,7 @@ void test_agent_memory_tool_rounds() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",
                                                   [](const ToolInput& input) {
@@ -262,7 +262,7 @@ void test_agent_memory_explicit_requests_bypass_memory() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .instructions = "Be concise.",
       .memory = memory,
@@ -288,7 +288,7 @@ void test_agent_memory_keep_last_messages() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           }),
       .instructions = "Be concise.",
       .memory = memory,
@@ -319,11 +319,11 @@ void test_agent_memory_stream() {
   cail::Agent agent({
       .model = cail::LanguageModel(
           [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, stop);
+            return client->generate(request, std::move(stop));
           },
           [client](const cail::GenerationRequest& request, const cail::StreamHandler& on_event,
                    std::stop_token stop) {
-            return client->stream(request, on_event, stop);
+            return client->stream(request, on_event, std::move(stop));
           }),
       .memory = memory,
       .conversation_id = "user-42",

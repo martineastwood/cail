@@ -90,14 +90,14 @@ public:
         });
       }
       const auto& id = documents[i].id;
-      const auto existing =
-          std::ranges::find_if(entries_, [&](const Entry& entry) { return entry.document.id == id; });
+      const auto existing = std::ranges::find_if(
+          entries_, [&](const Entry& entry) { return entry.document.id == id; });
       if (existing != entries_.end()) {
         existing->document = std::move(documents[i]);
         existing->embedding = std::move(batch->embeddings[i]);
       } else {
-        entries_.push_back(
-            Entry{.document = std::move(documents[i]), .embedding = std::move(batch->embeddings[i])});
+        entries_.push_back(Entry{.document = std::move(documents[i]),
+                                 .embedding = std::move(batch->embeddings[i])});
       }
     }
     return {};
@@ -113,8 +113,7 @@ public:
     if (!embedding) {
       return std::unexpected(embedding.error());
     }
-    if (embedding->dimensions != dimensions_ ||
-        embedding->values.size() != dimensions_) {
+    if (embedding->dimensions != dimensions_ || embedding->values.size() != dimensions_) {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
           .message = "The query embedding dimensions do not match the stored documents.",

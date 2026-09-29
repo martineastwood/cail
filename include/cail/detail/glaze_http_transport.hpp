@@ -19,10 +19,15 @@
 
 namespace cail::detail {
 
+#if defined(GLZ_USING_BOOST_ASIO)
+namespace asio = glz::asio;
+#else
+namespace asio = ::asio;
+#endif
+
 struct GlazeIoRuntime {
-  glz::asio::io_context context;
-  glz::asio::executor_work_guard<glz::asio::io_context::executor_type> work{
-      glz::asio::make_work_guard(context)};
+  asio::io_context context;
+  asio::executor_work_guard<asio::io_context::executor_type> work{asio::make_work_guard(context)};
   std::jthread first{[this] { context.run(); }};
   std::jthread second{[this] { context.run(); }};
 
@@ -49,8 +54,7 @@ public:
     auto done = std::make_shared<std::promise<Result<HttpResponse>>>();
     auto future = done->get_future();
     send_async(
-        request,
-        [done](Result<HttpResponse> result) { done->set_value(std::move(result)); }, stop);
+        request, [done](Result<HttpResponse> result) { done->set_value(std::move(result)); }, stop);
     return future.get();
   }
 
@@ -125,8 +129,7 @@ public:
                 state->response.headers.push_back({.name = name, .value = value});
               }
             },
-        .on_disconnect =
-            [state, executor] { glz::asio::post(executor, [state] { state->finish(); }); },
+        .on_disconnect = [state, executor] { asio::post(executor, [state] { state->finish(); }); },
         .status_is_error = [](int) { return false; },
     };
 

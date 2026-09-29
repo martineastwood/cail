@@ -72,10 +72,9 @@ public:
     auto endpoint = embeddings_endpoint_from(settings_.endpoint);
     if (!endpoint) {
       const auto error = endpoint.error();
-      return EmbeddingModel{
-          [error](const std::vector<std::string>&) -> Result<EmbeddingBatch> {
-            return std::unexpected(error);
-          }};
+      return EmbeddingModel{[error](const std::vector<std::string>&) -> Result<EmbeddingBatch> {
+        return std::unexpected(error);
+      }};
     }
     return make_embedding_model(EmbeddingClientSettings{
         .endpoint = std::move(*endpoint),

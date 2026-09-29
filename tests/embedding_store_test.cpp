@@ -133,8 +133,8 @@ void test_embedding_store_dimension_mismatch() {
 
   bool query_is_three = true;
   cail::EmbeddingStore search_store(cail::EmbeddingModel{
-      [&query_is_three](const std::vector<std::string>& inputs)
-          -> cail::Result<cail::EmbeddingBatch> {
+      [&query_is_three](
+          const std::vector<std::string>& inputs) -> cail::Result<cail::EmbeddingBatch> {
         const std::size_t dimensions = query_is_three && inputs.size() == 1 ? 3 : 2;
         query_is_three = false;
         cail::EmbeddingBatch batch{.model = "stub", .dimensions = dimensions};
