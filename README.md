@@ -236,36 +236,66 @@ An agent runs the same bounded tool loop as `generate_text`. It sends its instru
 the first system message, executes tool calls, returns their results to the model, and
 stops when the model answers or the round limit is reached.
 
-Without a memory backend, an agent is stateless. Pass a `GenerationRequest` when you need
-conversation history or per-request options:
+For a conversation that should remember earlier messages, attach the file-backed memory
+backend:
 
 ```cpp
+cail::Agent weather_agent({
+    .model = cail::openai("gpt-6-luna"),
+    .instructions = "You help travelers plan around the weather.",
+    .tools = {weather_tool},
+    .memory = std::make_shared<cail::FileConversationMemory>("conversations"),
+    .conversation_id = "traveler-42",
+});
+
+auto first = weather_agent.generate("What should I pack for Paris?");
+auto second = weather_agent.generate("What about shoes?");
+```
+
+`FileConversationMemory` stores one JSON file per conversation id, so the second prompt can
+use the first prompt and response, including any tool calls and results. The history is
+loaded before each prompt and appended after a successful call. Set `keep_last_messages`
+on the options to limit how much history is sent.
+
+If your history lives in a database or another store, implement the
+`cail::ConversationMemory` interface and pass it as `.memory` instead. It provides
+`load`, `append`, and `clear` operations for each conversation id. See
+[Memory](https://martineastwood.github.io/cail/guides/memory/) for the built-in and custom
+backends.
+
+For full control, pass a `GenerationRequest`. This overload bypasses memory: CAIL sends
+the messages you provide and does not load or store anything. It is useful for manually
+managed history and per-request options:
+
+```cpp
+std::vector<cail::Message> history = {
+    cail::Message{
+        .content = {cail::TextPart{.text = "What should I pack for Paris?"}},
+    },
+    cail::Message{
+        .role = cail::MessageRole::assistant,
+        .content = {cail::TextPart{
+            .text = "Bring a light rain jacket and comfortable layers.",
+        }},
+    },
+    cail::Message{
+        .content = {cail::TextPart{.text = "What about shoes?"}},
+    },
+};
+
 auto result = weather_agent.generate(cail::GenerationRequest{
     .messages = history,
     .max_output_tokens = 256,
 });
+if (result) {
+    history.insert(history.end(), result->turn.begin(), result->turn.end());
+}
 ```
 
-Your application owns and persists `history`. For agents that remember their
-conversation, attach a memory backend instead:
-
-```cpp
-cail::Agent agent({
-    .model = cail::openai("gpt-6-luna"),
-    .instructions = "You are a concise research assistant.",
-    .memory = std::make_shared<cail::FileConversationMemory>("conversations"),
-    .conversation_id = "user-42",
-});
-
-auto reply = agent.generate("What is my name?");
-```
-
-A memory agent loads the stored history before each prompt and appends the new
-turn, including tool calls and their results, after it succeeds. Set
-`keep_last_messages` on the options to bound what is sent. See
-[Memory](https://martineastwood.github.io/cail/guides/memory/) for backends,
-conversation ids, and storing history in your own store. Use `LanguageModel`
-directly for a hand-written workflow whose steps are known in advance.
+`history` must include the current user message because a `GenerationRequest` has no
+separate prompt field. Your application owns this vector and should append
+`result->turn` after successful calls. Keep the agent's instructions out of `history`,
+because `Agent` adds them as the system message.
 
 ## Streaming
 
