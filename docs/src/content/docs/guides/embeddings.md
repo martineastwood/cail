@@ -61,10 +61,12 @@ auto model = cail::foundry.embedding_model("text-embedding-3-small", embeddings_
 
 ## Store and search embeddings
 
-Use `cail::EmbeddingStore` to search a small collection of documents by meaning. Add
-documents once, then search with a query string:
+Use `cail::EmbeddingStore` to search a small collection of documents by meaning. Include
+`<cail/embedding_store.hpp>`, add documents, then search with a query string:
 
 ```cpp
+#include <cail/embedding_store.hpp>
+
 cail::EmbeddingStore store(cail::openai.embedding_model("text-embedding-3-small"));
 store.add({
     {.id = "apple", .text = "A red apple"},
@@ -88,9 +90,10 @@ the query and returns up to `top_k` documents (four by default), best match firs
 read it. Searching an empty store returns no results without calling the provider.
 
 The store compares every query against every document in memory, which is fast for small
-collections and needs no database. When your documents change, add the new ones and search
-again. For large collections or persistence across restarts, use a dedicated vector
-database and keep the model ID and dimension count alongside your vectors.
+collections and needs no database. Adding a document with an existing `id` replaces the
+stored text and vector. Call `clear()` to remove every document and start over. For large
+collections or persistence across restarts, use a dedicated vector database and keep the
+model ID and dimension count alongside your vectors.
 
 ## Build and run the examples
 

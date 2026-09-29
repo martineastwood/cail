@@ -21,6 +21,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_stream([
                 'data: {"choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n',
             ], hold=True)
+        elif self.path == "/chat/delay":
+            time.sleep(1)
+            self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"content": "Hello"}}]})
         elif self.path == "/chat/truncated":
             self.send_stream(['data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n'])
         elif self.path == "/chat/structured":
@@ -154,6 +158,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Connection-Id", str(self.client_address[1]))
         for name, content in (headers or {}).items():
             self.send_header(name, content)
         self.end_headers()
@@ -177,6 +182,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 128
 
 
 with Server(("127.0.0.1", 0), Handler) as server:

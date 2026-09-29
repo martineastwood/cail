@@ -471,8 +471,9 @@ public:
                   std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
       : config_(std::move(config)), transport_(std::move(transport)) {}
 
-  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
-    return run(request, {}, {});
+  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
+                                                    std::stop_token stop = {}) const {
+    return run(request, {}, stop);
   }
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& on_event,
@@ -624,7 +625,7 @@ private:
         on_event
             ? transport_->stream(
                   http, [&](std::string_view bytes) { parser.feed(bytes, handle_event); }, stop)
-            : transport_->send(http);
+            : transport_->send(http, stop);
     if (!response)
       return std::unexpected(response.error());
     if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
@@ -698,7 +699,9 @@ public:
                                   .headers = settings_.headers},
         std::move(transport));
     return LanguageModel{
-        [client](const GenerationRequest& request) { return client->generate(request); },
+        [client](const GenerationRequest& request, std::stop_token stop) {
+          return client->generate(request, stop);
+        },
         [client](const GenerationRequest& request, const StreamHandler& handler,
                  std::stop_token stop) { return client->stream(request, handler, stop); },
         AdapterCapabilities{
@@ -708,12 +711,9 @@ public:
   [[nodiscard]] EmbeddingModel
   embedding_model(std::string model_id,
                   std::optional<std::size_t> dimensions = std::nullopt) const {
-    return detail::make_embedding_model(detail::EmbeddingClientSettings{
-        .endpoint = settings_.base_url + "/embeddings",
-        .api_key = detail::env_or(settings_.api_key, "ANTHROPIC_API_KEY"),
-        .model = std::move(model_id),
-        .dimensions = dimensions,
-    });
+    return detail::make_openai_style_embedding_model(
+        settings_.base_url + "/embeddings", detail::env_or(settings_.api_key, "ANTHROPIC_API_KEY"),
+        std::move(model_id), dimensions);
   }
 
 private:

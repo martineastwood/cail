@@ -1,10 +1,15 @@
 #include <cail/cail.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 struct Answer {
   std::string answer;
@@ -44,6 +49,74 @@ int main(int argc, char** argv) {
       cail::create_local({.endpoint = base + "/local/chat"})("test-model").generate(prompt());
   check(local_result && local_result->text == "Hello",
         "Local provider posts to the configured endpoint without an API key");
+  auto shared_model = cail::create_local({.endpoint = base + "/local/chat"})("test-model");
+  auto first = std::async(std::launch::async, [&] { return shared_model.generate(prompt()); });
+  auto second = std::async(std::launch::async, [&] { return shared_model.generate(prompt()); });
+  check(first.get() && second.get(), "one model handles concurrent default-transport calls");
+
+  auto async_model = cail::create_local({.endpoint = base + "/chat/delay"})("test-model");
+  check(async_model.adapter_capabilities().async_generation,
+        "Chat Completions models report async generation support");
+  std::vector<std::future<cail::Result<cail::GenerationResponse>>> pending;
+  std::atomic<bool> observed_async_response{false};
+  const auto async_began = std::chrono::steady_clock::now();
+  for (int index = 0; index < 12; ++index) {
+    auto completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+    pending.push_back(completion->get_future());
+    auto request = prompt();
+    if (index == 0) {
+      request.middleware.push_back({.after_response = [&](const cail::HttpResponse& response,
+                                                          const cail::MiddlewareContext&) {
+        observed_async_response.store(response.status_code == 200);
+      }});
+    }
+    const auto started = async_model.generate_async(
+        std::move(request), [completion](cail::Result<cail::GenerationResponse> response) {
+          completion->set_value(std::move(response));
+        });
+    check(started.has_value(), "async generation starts");
+  }
+  const auto launch_time = std::chrono::steady_clock::now() - async_began;
+  check(launch_time < std::chrono::milliseconds{800},
+        "async generation returns before delayed HTTP responses");
+  for (auto& result : pending) {
+    const auto response = result.get();
+    check(response && response->text == "Hello", "async generation decodes the response");
+  }
+  check(observed_async_response.load(), "async generation runs response middleware");
+
+  auto error_model = cail::create_local({.endpoint = base + "/chat/error"})(
+      "test-model", cail::make_default_http_transport({.retry = {.max_retries = 0}}));
+  auto failed = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+  auto failed_response = failed->get_future();
+  const auto error_started = error_model.generate_async(
+      prompt(), [failed](cail::Result<cail::GenerationResponse> response) {
+        failed->set_value(std::move(response));
+      });
+  check(error_started.has_value(), "async error request starts");
+  const auto async_error = failed_response.get();
+  check(!async_error && async_error.error().code == cail::ErrorCode::http_status &&
+            async_error.error().http_status == 429,
+        "async generation preserves HTTP error context");
+
+  auto held_model = cail::create_local({.endpoint = base + "/chat/hold"})("test-model");
+  auto cancellation = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+  auto cancelled_response = cancellation->get_future();
+  std::stop_source async_stop;
+  const auto active = held_model.generate_async(
+      prompt(),
+      [cancellation](cail::Result<cail::GenerationResponse> response) {
+        cancellation->set_value(std::move(response));
+      },
+      async_stop.get_token());
+  check(active.has_value(), "cancellable async generation starts");
+  std::this_thread::sleep_for(std::chrono::milliseconds{50});
+  async_stop.request_stop();
+  check(cancelled_response.wait_for(std::chrono::seconds{2}) == std::future_status::ready,
+        "async cancellation completes promptly");
+  const auto cancelled_async = cancelled_response.get();
+  check(!cancelled_async && cancelled_async.error().code == cail::ErrorCode::cancelled,
+        "async generation reports cancellation");
   const auto keyed_local =
       cail::create_local({.api_key = "key", .endpoint = base + "/local/chat"})("test-model")
           .generate(prompt());

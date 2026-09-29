@@ -40,8 +40,9 @@ public:
   Client(Config config, std::unique_ptr<HttpTransport> transport)
       : config_(std::move(config)), transport_(std::move(transport)) {}
 
-  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
-    return generate_impl(request, {});
+  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
+                                                    std::stop_token stop = {}) const {
+    return generate_impl(request, {}, stop);
   }
 
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
@@ -416,7 +417,7 @@ private:
         streaming ? transport_->stream(
                         http_request,
                         [&](std::string_view bytes) { sse_parser.feed(bytes, handle_event); }, stop)
-                  : transport_->send(http_request);
+                  : transport_->send(http_request, stop);
     if (!http_response) {
       return std::unexpected(http_response.error());
     }
@@ -531,7 +532,9 @@ make_openai_responses_client(openai::Config config, std::unique_ptr<HttpTranspor
 [[nodiscard]] inline LanguageModel
 language_model_from(const std::shared_ptr<openai::Client>& client) {
   return LanguageModel{
-      [client](const GenerationRequest& request) { return client->generate(request); },
+      [client](const GenerationRequest& request, std::stop_token stop) {
+        return client->generate(request, stop);
+      },
       [client](const GenerationRequest& request, const StreamHandler& handler,
                std::stop_token stop) { return client->stream(request, handler, stop); },
       openai_responses_adapter_capabilities(),
@@ -576,12 +579,9 @@ public:
   [[nodiscard]] EmbeddingModel
   embedding_model(std::string model_id,
                   std::optional<std::size_t> dimensions = std::nullopt) const {
-    return detail::make_embedding_model(detail::EmbeddingClientSettings{
-        .endpoint = settings_.base_url + "/embeddings",
-        .api_key = detail::env_or(settings_.api_key, OpenAITag::env_var),
-        .model = std::move(model_id),
-        .dimensions = dimensions,
-    });
+    return detail::make_openai_style_embedding_model(
+        settings_.base_url + "/embeddings", detail::env_or(settings_.api_key, OpenAITag::env_var),
+        std::move(model_id), dimensions);
   }
 
 private:

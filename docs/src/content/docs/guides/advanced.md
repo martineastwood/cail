@@ -7,26 +7,104 @@ These patterns cover what you need once the basic calls work: moving requests
 off your thread, tuning HTTP behavior, observing requests with middleware, and
 reaching provider features beyond the common API.
 
-## Synchronous execution
+## Run concurrent requests
 
-CAIL's generation, streaming, embedding, and tool-loop APIs block the calling
-thread until they finish. CAIL does not return futures or provide a coroutine
-API. This keeps scheduling under your control, so you can use the executor
-that already fits your application.
+`generate()`, `stream()`, embeddings, and tool loops block the calling thread.
+You can schedule them on your application's executor and share a provider model
+across concurrent tasks.
 
-For example, you can move a request off the current thread with `std::async`:
+For example, you can run two requests with `std::async`:
 
 ```cpp
-auto pending = std::async(std::launch::async, [] {
-    return cail::openai("gpt-6-luna").generate("Summarize this document.");
+auto model = cail::openai("gpt-6-luna");
+auto first = std::async(std::launch::async, [&] {
+    return cail::generate_text({.model = model, .prompt = "Summarize document A."});
+});
+auto second = std::async(std::launch::async, [&] {
+    return cail::generate_text({.model = model, .prompt = "Summarize document B."});
 });
 
-do_other_work();
-auto response = pending.get();
+auto first_response = first.get();
+auto second_response = second.get();
 ```
 
-Create a separate model instance inside each concurrent task. Model instances
-and their HTTP transports are not guaranteed to support concurrent calls.
+The default HTTP transport supports concurrent calls. If you supply your own
+transport, it must also support calls from multiple threads.
+
+Set `tool_loop.stop` to cancel a nonstreaming request, including a request
+waiting to retry:
+
+```cpp
+std::stop_source stop;
+auto pending = std::async(std::launch::async, [&] {
+    return cail::generate_text({
+        .model = model,
+        .prompt = "Summarize this document.",
+        .tool_loop = {.stop = stop.get_token()},
+    });
+});
+
+stop.request_stop();
+auto response = pending.get();
+// response.error().code is cail::ErrorCode::cancelled when stopped.
+```
+
+For a direct model call, pass the token as the second argument to
+`model.generate(request, stop.get_token())`.
+
+## Generate without blocking
+
+Chat Completions models can send a request and return immediately. Use
+`generate_async()` when you want CAIL to call you after the response arrives.
+This example assumes an OpenAI-compatible local server with a `llama3.2` model:
+
+```cpp
+#include <cail/cail.hpp>
+#include <future>
+#include <print>
+
+int main() {
+    auto model = cail::create_local({
+        .endpoint = "http://localhost:11434/v1/chat/completions",
+    })("llama3.2");
+    std::promise<void> finished;
+    auto done = finished.get_future();
+
+    auto started = model.generate_async(
+        {.messages = {cail::Message{
+            .content = {cail::TextPart{.text = "Explain RAII in one sentence."}},
+        }}},
+        [&finished](cail::Result<cail::GenerationResponse> result) {
+            if (result) std::println("{}", result->text);
+            else std::println(stderr, "{}", result.error().message);
+            finished.set_value();
+        });
+
+    if (!started) {
+        std::println(stderr, "{}", started.error().message);
+        return 1;
+    }
+    done.wait(); // Keep this small program alive until the callback finishes.
+}
+```
+
+The return value reports whether the request started. Once it starts, the
+completion callback receives either the response or an error, including
+`ErrorCode::cancelled` if you request a stop. The callback may run on a CAIL I/O
+thread, so pass work to your application's executor if it takes time. Keep the
+callback free of uncaught exceptions.
+Keep any objects captured by reference in the callback or middleware alive until
+the callback finishes.
+
+To cancel, pass `stop.get_token()` as the third argument and call
+`stop.request_stop()`. A request that already started completes its callback
+with `ErrorCode::cancelled`.
+
+Check `model.adapter_capabilities().async_generation` before using this API
+with a model. It is currently available for Chat Completions providers, such as
+Local, OpenRouter, and Mistral. Other providers report that async generation is
+unavailable. Async tool loops and streaming are not yet available. If you use a
+custom HTTP transport for async calls, implement its `send_async()` operation.
 
 ## Timeouts and retries
 

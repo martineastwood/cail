@@ -282,7 +282,7 @@ run_tool_loop(const Client& client, GenerationRequest request, const std::vector
               ToolLoopOptions options = {}) {
   return detail::run_tool_loop(
       std::move(request), tools, options,
-      [&](const GenerationRequest& step) { return client.generate(step); });
+      [&](const GenerationRequest& step) { return client.generate(step, options.stop); });
 }
 
 template <typename Client>

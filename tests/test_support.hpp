@@ -53,7 +53,11 @@ public:
   int send_count{};
   int stream_count{};
 
-  [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& value) override {
+  [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& value,
+                                                      std::stop_token stop) override {
+    if (stop.stop_requested()) {
+      return std::unexpected(cail::generation_cancelled_error());
+    }
     ++send_count;
     request = value;
     return response;
@@ -85,7 +89,10 @@ public:
       : responses_(std::move(responses)) {}
 
   [[nodiscard]] cail::Result<cail::GenerationResponse>
-  generate(const cail::GenerationRequest& request) const {
+  generate(const cail::GenerationRequest& request, std::stop_token stop = {}) const {
+    if (stop.stop_requested()) {
+      return std::unexpected(cail::generation_cancelled_error());
+    }
     requests.push_back(request);
     if (responses_.empty()) {
       return std::unexpected(cail::Error{

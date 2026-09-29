@@ -70,11 +70,13 @@ public:
       headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
     }
     headers.push_back({.name = "Content-Type", .value = "application/json"});
-    auto response = settings_.transport->send(HttpRequest{
-        .url = settings_.endpoint,
-        .headers = std::move(headers),
-        .body = std::move(*encoded),
-    });
+    auto response = settings_.transport->send(
+        HttpRequest{
+            .url = settings_.endpoint,
+            .headers = std::move(headers),
+            .body = std::move(*encoded),
+        },
+        {});
     if (!response)
       return std::unexpected(response.error());
     const auto context = [&](Error error) {
@@ -125,6 +127,17 @@ private:
   auto client = std::make_shared<EmbeddingClient>(std::move(settings));
   return EmbeddingModel{
       [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
+}
+
+[[nodiscard]] inline EmbeddingModel
+make_openai_style_embedding_model(std::string endpoint, std::string api_key, std::string model,
+                                  std::optional<std::size_t> dimensions = std::nullopt) {
+  return make_embedding_model(EmbeddingClientSettings{
+      .endpoint = std::move(endpoint),
+      .api_key = std::move(api_key),
+      .model = std::move(model),
+      .dimensions = dimensions,
+  });
 }
 
 } // namespace cail::detail

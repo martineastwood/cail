@@ -2,9 +2,76 @@
 
 #include <cail/openai.hpp>
 
+#include <algorithm>
+#include <condition_variable>
+#include <future>
+#include <mutex>
 #include <stop_token>
 
 namespace test {
+
+void test_shared_model_concurrency_and_cancellation() {
+  class ConcurrentTransport final : public cail::HttpTransport {
+  public:
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&,
+                                                        std::stop_token stop) override {
+      std::unique_lock lock(mutex);
+      ++active;
+      peak = std::max(peak, active);
+      condition.notify_all();
+      condition.wait_for(lock, stop, std::chrono::seconds(2), [&] { return peak == 2; });
+      --active;
+      if (stop.stop_requested()) {
+        return std::unexpected(cail::generation_cancelled_error());
+      }
+      return cail::HttpResponse{.status_code = 200,
+                                .body = R"({"status":"completed","output":[]})"};
+    }
+
+    [[nodiscard]] cail::Result<cail::HttpResponse>
+    stream(const cail::HttpRequest&, const cail::HttpDataHandler&, std::stop_token) override {
+      return std::unexpected(cail::Error{.code = cail::ErrorCode::invalid_configuration});
+    }
+
+    std::mutex mutex;
+    std::condition_variable_any condition;
+    int active{};
+    int peak{};
+  };
+
+  auto transport = std::make_unique<ConcurrentTransport>();
+  auto* probe = transport.get();
+  auto model = cail::create_openai({.api_key = "test-key"})("test-model", std::move(transport));
+  const auto request = cail::detail::user_prompt_request("Hello");
+  auto first = std::async(std::launch::async, [&] { return model.generate(request); });
+  auto second = std::async(std::launch::async, [&] { return model.generate(request); });
+  const auto first_result = first.get();
+  const auto second_result = second.get();
+  check(first_result && second_result && probe->peak == 2,
+        "one language model permits overlapping generation calls");
+
+  std::stop_source cancelled;
+  cancelled.request_stop();
+  const auto stopped = model.generate(request, cancelled.get_token());
+  check(!stopped && stopped.error().code == cail::ErrorCode::cancelled,
+        "generation observes cancellation before a request starts");
+
+  {
+    std::lock_guard lock(probe->mutex);
+    probe->peak = 0;
+  }
+  std::stop_source active_stop;
+  auto active_request = std::async(
+      std::launch::async, [&] { return model.generate(request, active_stop.get_token()); });
+  {
+    std::unique_lock lock(probe->mutex);
+    probe->condition.wait(lock, [&] { return probe->active == 1; });
+  }
+  active_stop.request_stop();
+  const auto interrupted = active_request.get();
+  check(!interrupted && interrupted.error().code == cail::ErrorCode::cancelled,
+        "generation cancels an active HTTP request");
+}
 
 void test_middleware_chain() {
   auto transport = std::make_unique<StubTransport>();
@@ -242,6 +309,7 @@ void test_image_content() {
 } // namespace test
 
 int main() {
+  test::test_shared_model_concurrency_and_cancellation();
   test::test_middleware_chain();
   test::test_openai_strict_optional_schemas();
   test::test_openai_reasoning_summary();

@@ -7,6 +7,7 @@
 #include <cail/tool.hpp>
 
 #include <algorithm>
+#include <future>
 #include <memory>
 
 namespace test {
@@ -146,7 +147,9 @@ void test_agent() {
       std::vector<cail::GenerationResponse>{cail::GenerationResponse{.text = "hello"}});
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .instructions = "Be concise.",
       .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",
                                                   [](const ToolInput& input) {
@@ -222,7 +225,8 @@ void test_streaming_tool_loop_and_stop_conditions() {
 void test_transport_retries() {
   class FlakyTransport final : public cail::HttpTransport {
   public:
-    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&) override {
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&,
+                                                        std::stop_token) override {
       ++attempts;
       return cail::HttpResponse{.status_code = attempts < 3 ? 429 : 200};
     }
@@ -245,7 +249,7 @@ void test_transport_retries() {
   auto* send_flaky = send_transport.get();
   cail::RetryingHttpTransport retrying_send(std::move(send_transport),
                                             {.max_retries = 2, .initial_delay = {}});
-  const auto response = retrying_send.send({});
+  const auto response = retrying_send.send({}, {});
   check(response && response->status_code == 200 && send_flaky->attempts == 3,
         "transport retries 429 responses up to the configured limit");
 
@@ -259,9 +263,39 @@ void test_transport_retries() {
   check(stream_response && data == "done" && stream_flaky->attempts == 2,
         "transport retries a 5xx stream before delivering data");
 
+  class RetryWaitTransport final : public cail::HttpTransport {
+  public:
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&,
+                                                        std::stop_token) override {
+      sent.set_value();
+      return cail::HttpResponse{.status_code = 503};
+    }
+    [[nodiscard]] cail::Result<cail::HttpResponse>
+    stream(const cail::HttpRequest&, const cail::HttpDataHandler&, std::stop_token) override {
+      return std::unexpected(cail::Error{.code = cail::ErrorCode::invalid_configuration});
+    }
+    std::promise<void> sent;
+  };
+  auto retry_wait_transport = std::make_unique<RetryWaitTransport>();
+  auto sent = retry_wait_transport->sent.get_future();
+  cail::RetryingHttpTransport retry_wait(
+      std::move(retry_wait_transport),
+      {.max_retries = 2, .initial_delay = std::chrono::seconds{5}});
+  std::stop_source stop;
+  auto pending =
+      std::async(std::launch::async, [&] { return retry_wait.send({}, stop.get_token()); });
+  sent.wait();
+  const auto began = std::chrono::steady_clock::now();
+  stop.request_stop();
+  const auto cancelled = pending.get();
+  check(!cancelled && cancelled.error().code == cail::ErrorCode::cancelled &&
+            std::chrono::steady_clock::now() - began < std::chrono::seconds{2},
+        "cancellation interrupts the HTTP retry delay");
+
   class TimeoutTransport final : public cail::HttpTransport {
   public:
-    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& request) override {
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest& request,
+                                                        std::stop_token) override {
       timeout = request.timeout;
       return cail::HttpResponse{.status_code = 200};
     }
@@ -275,9 +309,58 @@ void test_transport_retries() {
   auto* timeout_probe = timeout_transport.get();
   cail::TimeoutHttpTransport configured_timeout(std::move(timeout_transport),
                                                 std::chrono::seconds{7});
-  static_cast<void>(configured_timeout.send({}));
+  static_cast<void>(configured_timeout.send({}, {}));
   check(timeout_probe->timeout == std::chrono::seconds{7},
         "transport applies the configured request timeout");
+}
+
+void test_async_transport_retries() {
+  class AsyncTransport final : public cail::HttpTransport {
+  public:
+    [[nodiscard]] cail::Result<cail::HttpResponse> send(const cail::HttpRequest&,
+                                                        std::stop_token) override {
+      return std::unexpected(cail::Error{.code = cail::ErrorCode::invalid_configuration});
+    }
+    void send_async(cail::HttpRequest, cail::HttpCompletion complete, std::stop_token) override {
+      ++attempts;
+      complete(cail::HttpResponse{.status_code = attempts < 3 ? 503 : 200});
+    }
+    [[nodiscard]] cail::Result<cail::HttpResponse>
+    stream(const cail::HttpRequest&, const cail::HttpDataHandler&, std::stop_token) override {
+      return std::unexpected(cail::Error{.code = cail::ErrorCode::invalid_configuration});
+    }
+    int attempts{};
+  };
+
+  auto transport = std::make_unique<AsyncTransport>();
+  auto* probe = transport.get();
+  cail::RetryingHttpTransport retrying(std::move(transport),
+                                       {.max_retries = 2, .initial_delay = {}});
+  std::promise<cail::Result<cail::HttpResponse>> completed;
+  auto result = completed.get_future();
+  retrying.send_async(
+      {},
+      [&](cail::Result<cail::HttpResponse> response) { completed.set_value(std::move(response)); },
+      {});
+  const auto response = result.get();
+  check(response && response->status_code == 200 && probe->attempts == 3,
+        "async transport retries 5xx responses without blocking the caller");
+
+  auto cancel_transport = std::make_unique<AsyncTransport>();
+  cail::RetryingHttpTransport cancel_retry(
+      std::move(cancel_transport), {.max_retries = 2, .initial_delay = std::chrono::seconds{5}});
+  std::promise<cail::Result<cail::HttpResponse>> cancelled;
+  auto cancelled_result = cancelled.get_future();
+  std::stop_source stop;
+  cancel_retry.send_async(
+      {}, [&](cail::Result<cail::HttpResponse> value) { cancelled.set_value(std::move(value)); },
+      stop.get_token());
+  stop.request_stop();
+  check(cancelled_result.wait_for(std::chrono::seconds{1}) == std::future_status::ready,
+        "cancellation interrupts an async retry delay");
+  const auto stopped = cancelled_result.get();
+  check(!stopped && stopped.error().code == cail::ErrorCode::cancelled,
+        "async retry reports cancellation");
 }
 
 } // namespace test
@@ -290,5 +373,6 @@ int main() {
   test::test_agent();
   test::test_streaming_tool_loop_and_stop_conditions();
   test::test_transport_retries();
+  test::test_async_transport_retries();
   return test::failures == 0 ? 0 : 1;
 }

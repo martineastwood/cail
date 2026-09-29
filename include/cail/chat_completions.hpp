@@ -499,8 +499,37 @@ public:
       : settings_(std::move(settings)), model_(std::move(model)), transport_(std::move(transport)) {
   }
 
-  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request) const {
-    return run(request, {}, {});
+  [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
+                                                    std::stop_token stop = {}) const {
+    return run(request, {}, stop);
+  }
+  [[nodiscard]] Result<void> generate_async(GenerationRequest request,
+                                            LanguageModel::GenerationCompletion complete,
+                                            std::stop_token stop = {}) const {
+    if (stop.stop_requested()) {
+      return std::unexpected(generation_cancelled_error());
+    }
+    auto http = make_http_request(request, false);
+    if (!http) {
+      return std::unexpected(http.error());
+    }
+    transport_->send_async(
+        std::move(*http),
+        [request = std::move(request), complete = std::move(complete),
+         retain_reasoning = settings_.retain_reasoning_content](Result<HttpResponse> response) {
+          if (!response) {
+            complete(std::unexpected(response.error()));
+            return;
+          }
+          if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+            complete(std::unexpected(middleware.error()));
+            return;
+          }
+          auto result = decode_http_response(*response, retain_reasoning);
+          complete(std::move(result));
+        },
+        stop);
+    return {};
   }
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& on_event,
@@ -509,16 +538,13 @@ public:
   }
 
 private:
-  [[nodiscard]] Result<GenerationResponse>
-  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
-    if (stop.stop_requested())
-      return std::unexpected(generation_cancelled_error());
+  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
+                                                      bool streaming) const {
     if (settings_.endpoint.empty() || !transport_)
       return std::unexpected(
           Error{.code = ErrorCode::invalid_configuration,
                 .message = "Chat Completions requires an endpoint and transport."});
-    auto body =
-        encode(request, model_, static_cast<bool>(on_event), settings_.retain_reasoning_content);
+    auto body = encode(request, model_, streaming, settings_.retain_reasoning_content);
     if (!body)
       return std::unexpected(body.error());
     auto encoded = to_json(*body);
@@ -546,13 +572,41 @@ private:
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
     if (!settings_.api_key.empty())
       http.headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
-    if (on_event)
+    if (streaming)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
     cail::detail::append_session_header(http.headers, settings_.request_session_header,
                                         request.session_id);
     if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
       return std::unexpected(middleware.error());
     }
+    return http;
+  }
+
+  [[nodiscard]] static Result<GenerationResponse> decode_http_response(const HttpResponse& response,
+                                                                       bool retain_reasoning) {
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+    };
+    if (is_http_error_status(response.status_code)) {
+      return context(http_status_error_from_json_body(response));
+    }
+    ResponseBody parsed;
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
+        error)
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = glz::format_error(error, response.body)});
+    auto result = decode(parsed, retain_reasoning);
+    return result ? result : context(result.error());
+  }
+
+  [[nodiscard]] Result<GenerationResponse>
+  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto http = make_http_request(request, static_cast<bool>(on_event));
+    if (!http)
+      return std::unexpected(http.error());
     cail::detail::SseParser parser;
     GenerationResponse partial;
     std::map<std::size_t, cail::ToolCall> pending_calls;
@@ -674,8 +728,8 @@ private:
     auto response =
         on_event
             ? transport_->stream(
-                  http, [&](std::string_view bytes) { parser.feed(bytes, handle_event); }, stop)
-            : transport_->send(http);
+                  *http, [&](std::string_view bytes) { parser.feed(bytes, handle_event); }, stop)
+            : transport_->send(*http, stop);
     if (!response)
       return std::unexpected(response.error());
     if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
@@ -683,21 +737,14 @@ private:
     }
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
+    if (!on_event) {
+      return decode_http_response(*response, settings_.retain_reasoning_content);
+    }
     const auto context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
     };
     if (is_http_error_status(response->status_code)) {
       return context(http_status_error_from_json_body(*response));
-    }
-    if (!on_event) {
-      ResponseBody parsed;
-      if (const auto error =
-              glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response->body);
-          error)
-        return context(Error{.code = ErrorCode::provider_response,
-                             .message = glz::format_error(error, response->body)});
-      auto result = decode(parsed, settings_.retain_reasoning_content);
-      return result ? result : context(result.error());
     }
     parser.finish(handle_event);
     if (stream_error)
@@ -756,10 +803,16 @@ public:
     auto client = std::make_shared<detail::chat_completions::Client>(settings_, std::move(model_id),
                                                                      std::move(transport));
     return LanguageModel{
-        [client](const GenerationRequest& request) { return client->generate(request); },
+        [client](const GenerationRequest& request, std::stop_token stop) {
+          return client->generate(request, stop);
+        },
         [client](const GenerationRequest& request, const StreamHandler& handler,
                  std::stop_token stop) { return client->stream(request, handler, stop); },
-        chat_completions_adapter_capabilities()};
+        chat_completions_adapter_capabilities(),
+        [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+                 std::stop_token stop) {
+          return client->generate_async(std::move(request), std::move(complete), stop);
+        }};
   }
 
 private:

@@ -425,9 +425,12 @@ auto model = cail::foundry.embedding_model("text-embedding-3-small", embeddings_
 ### Search a small collection
 
 Use `cail::EmbeddingStore` when you want to search a handful of documents by meaning
-without a database. Add documents once, then search with a query string:
+without a database. Include `<cail/embedding_store.hpp>`, add documents, then search with
+a query string:
 
 ```cpp
+#include <cail/embedding_store.hpp>
+
 cail::EmbeddingStore store(cail::openai.embedding_model("text-embedding-3-small"));
 store.add({
     {.id = "apple", .text = "A red apple"},
@@ -442,11 +445,12 @@ if (results) {
 }
 ```
 
-`add` embeds the documents in one batch. `search` embeds the query and returns up to
-`top_k` documents (four by default), best match first, scored by cosine similarity. Both
-return an error rather than throwing. The store keeps everything in memory and compares
-each query against every document, so reach for a dedicated vector database when your
-collection grows.
+`add` embeds the documents in one batch. Adding a document with an existing `id` replaces
+the stored text and vector. Call `clear()` to remove every document and start over.
+`search` embeds the query and returns up to `top_k` documents (four by default), best match
+first, scored by cosine similarity. Both return an error rather than throwing. The store
+keeps everything in memory and compares each query against every document, so reach for a
+dedicated vector database when your collection grows.
 
 ## Providers
 
@@ -667,23 +671,31 @@ availability.
 
 ## Control execution
 
-CAIL's generation, streaming, embedding, and tool-loop APIs block the calling thread until
-they finish. CAIL does not return futures or provide a coroutine API. This keeps scheduling
-under your control, so you can use the executor that already fits your application.
+`generate()`, `stream()`, embeddings, and tool loops block the calling thread until they
+finish. You can schedule these calls on your application's executor and share a provider
+model across concurrent tasks.
 
 For example, you can move a request off the current thread with `std::async`:
 
 ```cpp
-auto pending = std::async(std::launch::async, [] {
-    return cail::openai("gpt-6-luna").generate("Summarize this document.");
+auto model = cail::openai("gpt-6-luna");
+auto pending = std::async(std::launch::async, [&] {
+    return cail::generate_text({.model = model, .prompt = "Summarize this document."});
 });
 
 do_other_work();
 auto response = pending.get();
 ```
 
-Create a separate model instance inside each concurrent task. Model instances and their
-HTTP transports are not guaranteed to support concurrent calls.
+The default HTTP transport supports concurrent calls. A custom transport must also support
+calls from multiple threads. Pass a `std::stop_token` to `model.generate(request, token)`
+to cancel a nonstreaming request.
+
+Chat Completions models also support nonblocking `model.generate_async(request, callback, token)`.
+The call returns after starting the request, and the callback receives the response or error.
+Check `model.adapter_capabilities().async_generation` before calling it. The callback may run
+on a CAIL I/O thread, so send lengthy work to your application's executor. See
+[Advanced usage](docs/src/content/docs/guides/advanced.md) for an example.
 
 Provider requests time out after 30 seconds and retry 429 and 5xx responses twice with
 exponential backoff. You can tune both when you create a model:

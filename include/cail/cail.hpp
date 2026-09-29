@@ -4,7 +4,6 @@
 #include <cail/anthropic.hpp>
 #include <cail/chat_completions.hpp>
 #include <cail/embedding_model.hpp>
-#include <cail/embedding_store.hpp>
 #include <cail/error.hpp>
 #include <cail/field.hpp>
 #include <cail/foundry.hpp>

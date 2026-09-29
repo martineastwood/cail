@@ -130,7 +130,9 @@ void test_agent_memory() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .instructions = "Be concise.",
       .memory = memory,
       .conversation_id = "user-42",
@@ -174,7 +176,9 @@ void test_agent_memory_conversation_ids() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .memory = memory,
   });
 
@@ -202,7 +206,9 @@ void test_agent_memory_tool_rounds() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",
                                                   [](const ToolInput& input) {
                                                     return ToolOutput{.count = static_cast<int>(
@@ -233,8 +239,9 @@ void test_agent_memory_tool_rounds() {
 void test_agent_memory_failures_store_nothing() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
-      .model = cail::LanguageModel(
-          [](const cail::GenerationRequest&) -> cail::Result<cail::GenerationResponse> {
+      .model =
+          cail::LanguageModel([](const cail::GenerationRequest&,
+                                 const std::stop_token&) -> cail::Result<cail::GenerationResponse> {
             return std::unexpected(
                 cail::Error{.code = cail::ErrorCode::provider_response, .message = "down."});
           }),
@@ -254,7 +261,9 @@ void test_agent_memory_explicit_requests_bypass_memory() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .instructions = "Be concise.",
       .memory = memory,
       .conversation_id = "user-42",
@@ -278,7 +287,9 @@ void test_agent_memory_keep_last_messages() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); }),
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          }),
       .instructions = "Be concise.",
       .memory = memory,
       .conversation_id = "user-42",
@@ -307,10 +318,12 @@ void test_agent_memory_stream() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({
       .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request) { return client->generate(request); },
+          [client](const cail::GenerationRequest& request, std::stop_token stop) {
+            return client->generate(request, stop);
+          },
           [client](const cail::GenerationRequest& request, const cail::StreamHandler& on_event,
                    std::stop_token stop) {
-            return client->stream(request, on_event, std::move(stop));
+            return client->stream(request, on_event, stop);
           }),
       .memory = memory,
       .conversation_id = "user-42",

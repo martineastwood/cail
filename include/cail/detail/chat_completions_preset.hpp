@@ -28,12 +28,20 @@ namespace detail {
 
 // Presets point at a chat endpoint, so embeddings live at the sibling path:
 // "https://api.mistral.ai/v1/chat/completions" -> "https://api.mistral.ai/v1/embeddings".
-[[nodiscard]] inline std::string embeddings_endpoint_from(std::string_view chat_endpoint) {
-  constexpr std::string_view suffix{"/chat/completions"};
-  if (!chat_endpoint.ends_with(suffix)) {
+[[nodiscard]] inline Result<std::string> embeddings_endpoint_from(std::string_view chat_endpoint) {
+  constexpr std::string_view chat_suffix{"/chat/completions"};
+  if (chat_endpoint.ends_with(chat_suffix)) {
+    return std::string{chat_endpoint.substr(0, chat_endpoint.size() - chat_suffix.size())} +
+           "/embeddings";
+  }
+  constexpr std::string_view embeddings_suffix{"/embeddings"};
+  if (chat_endpoint.ends_with(embeddings_suffix)) {
     return std::string{chat_endpoint};
   }
-  return std::string{chat_endpoint.substr(0, chat_endpoint.size() - suffix.size())} + "/embeddings";
+  return std::unexpected(Error{
+      .code = ErrorCode::invalid_configuration,
+      .message = "The provider endpoint must end with /chat/completions or /embeddings.",
+  });
 }
 
 template <typename Tag> class ChatCompletionsPresetProvider {
@@ -61,8 +69,16 @@ public:
   [[nodiscard]] EmbeddingModel
   embedding_model(std::string model_id,
                   std::optional<std::size_t> dimensions = std::nullopt) const {
+    auto endpoint = embeddings_endpoint_from(settings_.endpoint);
+    if (!endpoint) {
+      const auto error = endpoint.error();
+      return EmbeddingModel{
+          [error](const std::vector<std::string>&) -> Result<EmbeddingBatch> {
+            return std::unexpected(error);
+          }};
+    }
     return make_embedding_model(EmbeddingClientSettings{
-        .endpoint = embeddings_endpoint_from(settings_.endpoint),
+        .endpoint = std::move(*endpoint),
         .api_key = env_or(settings_.api_key, Tag::env_var),
         .model = std::move(model_id),
         .dimensions = dimensions,

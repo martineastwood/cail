@@ -70,11 +70,11 @@ template <typename Client>
 [[nodiscard]] LanguageModel language_model_from(std::shared_ptr<Client> client, bool has_api_key,
                                                 AdapterCapabilities capabilities) {
   return LanguageModel{
-      [client, has_api_key](const GenerationRequest& request) {
+      [client, has_api_key](const GenerationRequest& request, std::stop_token stop) {
         if (auto valid = validate_request(request, has_api_key); !valid) {
           return Result<GenerationResponse>{std::unexpected(valid.error())};
         }
-        return client->generate(request);
+        return client->generate(request, stop);
       },
       [client, has_api_key](const GenerationRequest& request, const StreamHandler& handler,
                             std::stop_token stop) {
@@ -173,12 +173,9 @@ public:
                   std::optional<std::size_t> dimensions = std::nullopt) const {
     const auto root = settings_.base_url.empty() ? detail::opencode::base_url(settings_.service)
                                                  : settings_.base_url;
-    return detail::make_embedding_model(detail::EmbeddingClientSettings{
-        .endpoint = root + "/embeddings",
-        .api_key = detail::env_or(settings_.api_key, "OPENCODE_API_KEY"),
-        .model = std::move(model_id),
-        .dimensions = dimensions,
-    });
+    return detail::make_openai_style_embedding_model(
+        root + "/embeddings", detail::env_or(settings_.api_key, "OPENCODE_API_KEY"),
+        std::move(model_id), dimensions);
   }
 
 private:

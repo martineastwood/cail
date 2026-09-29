@@ -1,4 +1,5 @@
 #include <cail/cail.hpp>
+#include <cail/embedding_store.hpp>
 
 #include <iostream>
 #include <vector>

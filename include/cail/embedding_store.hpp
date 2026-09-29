@@ -3,9 +3,9 @@
 #include <cail/embedding_model.hpp>
 #include <cail/error.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,6 +30,9 @@ namespace detail {
 // Cosine similarity of two equal-length vectors, 0 when either has no magnitude.
 [[nodiscard]] inline float cosine_similarity(const std::vector<float>& a,
                                              const std::vector<float>& b) {
+  if (a.size() != b.size()) {
+    return 0.0F;
+  }
   float dot = 0.0F;
   float norm_a = 0.0F;
   float norm_b = 0.0F;
@@ -44,14 +47,21 @@ namespace detail {
 
 } // namespace detail
 
-// An in-memory embeddings store. Add documents once, then search by text with
-// cosine similarity. Small and dependency-free: re-add and search again when
-// your documents change.
+// An in-memory embeddings store. Add documents, then search by text with cosine
+// similarity. Small and dependency-free: upsert by id to refresh a document, or
+// call clear() to start over.
 class EmbeddingStore {
 public:
   explicit EmbeddingStore(EmbeddingModel model) : model_(std::move(model)) {}
 
-  // Embeds the documents in a single batch and keeps them for search.
+  // Removes every document and resets dimension tracking.
+  void clear() noexcept {
+    entries_.clear();
+    dimensions_ = 0;
+  }
+
+  // Embeds the documents in a single batch. Replaces an existing document with the
+  // same id, otherwise appends.
   [[nodiscard]] Result<void> add(std::vector<Document> documents) {
     if (documents.empty()) {
       return {};
@@ -65,9 +75,30 @@ public:
     if (!batch) {
       return std::unexpected(batch.error());
     }
+    if (dimensions_ != 0 && batch->dimensions != dimensions_) {
+      return std::unexpected(Error{
+          .code = ErrorCode::invalid_configuration,
+          .message = "The document embedding dimensions do not match the store.",
+      });
+    }
+    dimensions_ = batch->dimensions;
     for (std::size_t i = 0; i < documents.size(); ++i) {
-      entries_.push_back(
-          Entry{.document = std::move(documents[i]), .embedding = std::move(batch->embeddings[i])});
+      if (batch->embeddings[i].values.size() != dimensions_) {
+        return std::unexpected(Error{
+            .code = ErrorCode::provider_response,
+            .message = "The embedding provider returned a vector with the wrong length.",
+        });
+      }
+      const auto& id = documents[i].id;
+      const auto existing =
+          std::ranges::find_if(entries_, [&](const Entry& entry) { return entry.document.id == id; });
+      if (existing != entries_.end()) {
+        existing->document = std::move(documents[i]);
+        existing->embedding = std::move(batch->embeddings[i]);
+      } else {
+        entries_.push_back(
+            Entry{.document = std::move(documents[i]), .embedding = std::move(batch->embeddings[i])});
+      }
     }
     return {};
   }
@@ -82,13 +113,20 @@ public:
     if (!embedding) {
       return std::unexpected(embedding.error());
     }
+    if (embedding->dimensions != dimensions_ ||
+        embedding->values.size() != dimensions_) {
+      return std::unexpected(Error{
+          .code = ErrorCode::invalid_configuration,
+          .message = "The query embedding dimensions do not match the stored documents.",
+      });
+    }
     std::vector<SearchResult> results;
     results.reserve(entries_.size());
     for (const auto& entry : entries_) {
-      if (entry.embedding.dimensions != embedding->dimensions) {
+      if (entry.embedding.values.size() != dimensions_) {
         return std::unexpected(Error{
-            .code = ErrorCode::invalid_configuration,
-            .message = "The query embedding dimensions do not match the stored documents.",
+            .code = ErrorCode::provider_response,
+            .message = "A stored embedding has the wrong vector length.",
         });
       }
       results.push_back(SearchResult{
@@ -96,10 +134,7 @@ public:
           .score = detail::cosine_similarity(entry.embedding.values, embedding->values),
       });
     }
-    std::sort(results.begin(), results.end(),
-              [](const SearchResult& left, const SearchResult& right) {
-                return left.score > right.score;
-              });
+    std::ranges::sort(results, std::ranges::greater{}, &SearchResult::score);
     if (results.size() > top_k) {
       results.resize(top_k);
     }
@@ -118,6 +153,7 @@ private:
 
   EmbeddingModel model_;
   std::vector<Entry> entries_;
+  std::size_t dimensions_{};
 };
 
 } // namespace cail
