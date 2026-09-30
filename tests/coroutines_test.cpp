@@ -81,7 +81,8 @@ cail::Task<void> single_embedding_call() {
 
 cail::Task<void> batch_embedding_call() {
   const auto& embeddings = immediate_embeddings();
-  const auto batch = co_await embeddings.embed_many_async(std::vector<std::string>{"a", "bb"});
+  auto inputs = std::vector<std::string>{"a", "bb"};
+  const auto batch = co_await embeddings.embed_many_async(std::move(inputs));
   check(batch && batch->embeddings.size() == 2 && batch->embeddings[1].values[0] == 2.0F,
         "await batch embeddings in input order");
 }
