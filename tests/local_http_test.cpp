@@ -60,15 +60,8 @@ cail::Task<void> coroutine_http_stream(cail::LanguageModel model) {
         "coroutine streaming delivers live events before its final response");
 }
 
-cail::Task<void> coroutine_http_tools(std::string base) {
-  auto count =
-      cail::tool<CountInput, int>("count", "Count characters", [](const CountInput& input) {
-        return static_cast<int>(input.query.size());
-      });
-  const auto tools = co_await cail::generate_text_async(
-      {.model = cail::create_local({.endpoint = base + "/tool-chat"})("test-model"),
-       .prompt = "Count abc",
-       .tools = {count}});
+cail::Task<void> await_tool_loop(cail::Task<cail::Result<cail::GenerationResponse>> task) {
+  const auto tools = co_await std::move(task);
   check(tools && tools->text == "Done" && tools->tool_results.size() == 1,
         "coroutine generation awaits the whole live tool loop");
 }
@@ -82,7 +75,13 @@ void coroutine_http(const std::string& base) {
   auto model = cail::create_local({.endpoint = base + "/chat"})("test-model");
   cail::run(coroutine_http_generation(model));
   cail::run(coroutine_http_stream(model));
-  cail::run(coroutine_http_tools(base));
+  auto count =
+      cail::tool<CountInput, int>("count", "Count characters", [](const CountInput& input) {
+        return static_cast<int>(input.query.size());
+      });
+  auto tool_model = cail::create_local({.endpoint = base + "/tool-chat"})("test-model");
+  cail::run(await_tool_loop(
+      cail::generate_text_async({.model = tool_model, .prompt = "Count abc", .tools = {count}})));
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::Agent agent({.model = model, .memory = memory, .conversation_id = "coroutine"});
   cail::run(coroutine_agent_call(agent, "Hello"));
