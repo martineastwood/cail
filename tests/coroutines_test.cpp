@@ -60,15 +60,21 @@ cail::Task<void> stream_calls() {
   check(!invalid_stream, "empty coroutine stream handlers remain validation errors");
 }
 
+const cail::EmbeddingModel& immediate_embeddings() {
+  static const cail::EmbeddingModel embeddings(
+      {}, [](auto inputs, auto done, auto) -> cail::Result<void> {
+        cail::EmbeddingBatch batch{.dimensions = 2};
+        for (const auto& input : inputs)
+          batch.embeddings.push_back(
+              {.values = {static_cast<float>(input.size()), 1.0F}, .dimensions = 2});
+        done(std::move(batch));
+        return {};
+      });
+  return embeddings;
+}
+
 cail::Task<void> embedding_calls() {
-  cail::EmbeddingModel embeddings({}, [](auto inputs, auto done, auto) -> cail::Result<void> {
-    cail::EmbeddingBatch batch{.dimensions = 2};
-    for (const auto& input : inputs)
-      batch.embeddings.push_back(
-          {.values = {static_cast<float>(input.size()), 1.0F}, .dimensions = 2});
-    done(std::move(batch));
-    return {};
-  });
+  const auto& embeddings = immediate_embeddings();
   const auto embedding = co_await embeddings.embed_async("hello");
   check(embedding && embedding->values[0] == 5.0F, "await a single embedding");
   const auto batch = co_await embeddings.embed_many_async(std::vector<std::string>{"a", "bb"});
