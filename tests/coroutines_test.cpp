@@ -73,13 +73,21 @@ const cail::EmbeddingModel& immediate_embeddings() {
   return embeddings;
 }
 
-cail::Task<void> embedding_calls() {
+cail::Task<void> single_embedding_call() {
   const auto& embeddings = immediate_embeddings();
   const auto embedding = co_await embeddings.embed_async("hello");
   check(embedding && embedding->values[0] == 5.0F, "await a single embedding");
+}
+
+cail::Task<void> batch_embedding_call() {
+  const auto& embeddings = immediate_embeddings();
   const auto batch = co_await embeddings.embed_many_async(std::vector<std::string>{"a", "bb"});
   check(batch && batch->embeddings.size() == 2 && batch->embeddings[1].values[0] == 2.0F,
         "await batch embeddings in input order");
+}
+
+cail::Task<void> invalid_embedding_call() {
+  const auto& embeddings = immediate_embeddings();
   const auto empty = co_await embeddings.embed_async("");
   check(!empty, "await embedding validation errors");
 }
@@ -226,7 +234,9 @@ int main() {
   cail::run(test::generation_calls());
   cail::run(test::object_call());
   cail::run(test::stream_calls());
-  cail::run(test::embedding_calls());
+  cail::run(test::single_embedding_call());
+  cail::run(test::batch_embedding_call());
+  cail::run(test::invalid_embedding_call());
   test::test_deferred();
   test::test_lazy_ownership();
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
