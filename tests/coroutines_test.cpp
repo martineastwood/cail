@@ -21,20 +21,28 @@ cail::LanguageModel immediate_model() {
       });
 }
 
-cail::Task<void> common_calls() {
-  const auto thread = std::this_thread::get_id();
+cail::Task<void> generation_calls() {
   auto model = immediate_model();
   const auto response = co_await cail::generate_text_async({.model = model, .prompt = "hello"});
   check(response && response->text == R"({"city":"Paris"})",
         "await text generation without a completion callback");
-  const auto object =
-      co_await cail::generate_object_async<Address>({.model = model, .prompt = "city"});
-  check(object && object->city == "Paris", "await typed structured output");
   const auto invalid = co_await cail::generate_text_async({.model = model});
   check(!invalid && invalid.error().code == cail::ErrorCode::invalid_configuration,
         "initiation errors are returned from co_await");
   const auto direct = co_await model.generate_async(cail::GenerationRequest{});
   check(direct.has_value(), "await low-level model generation");
+}
+
+cail::Task<void> object_call() {
+  auto model = immediate_model();
+  const auto object =
+      co_await cail::generate_object_async<Address>({.model = model, .prompt = "city"});
+  check(object && object->city == "Paris", "await typed structured output");
+}
+
+cail::Task<void> stream_calls() {
+  const auto thread = std::this_thread::get_id();
+  auto model = immediate_model();
   std::string text;
   auto on_event = [&](const cail::StreamEvent& event) {
     check(std::this_thread::get_id() == thread,
@@ -50,7 +58,9 @@ cail::Task<void> common_calls() {
   const auto invalid_stream =
       co_await cail::stream_text_async({.model = model, .prompt = "hello"}, cail::StreamHandler{});
   check(!invalid_stream, "empty coroutine stream handlers remain validation errors");
+}
 
+cail::Task<void> embedding_calls() {
   cail::EmbeddingModel embeddings({}, [](auto inputs, auto done, auto) -> cail::Result<void> {
     cail::EmbeddingBatch batch{.dimensions = 2};
     for (const auto& input : inputs)
@@ -207,7 +217,10 @@ void test_rejected_capture_release() {
 } // namespace test
 
 int main() {
-  cail::run(test::common_calls());
+  cail::run(test::generation_calls());
+  cail::run(test::object_call());
+  cail::run(test::stream_calls());
+  cail::run(test::embedding_calls());
   test::test_deferred();
   test::test_lazy_ownership();
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
