@@ -9,10 +9,109 @@
 #include <cail/tool.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <future>
 #include <memory>
 
 namespace test {
+
+enum class ValidationChoice { Yes, No };
+
+struct BoundedValue {
+  cail::Field<double> score{.minimum = 0.0, .maximum = 1.0};
+};
+
+struct NestedBounds {
+  cail::Field<std::vector<BoundedValue>> values;
+  std::optional<BoundedValue> extra;
+};
+
+struct BoundedInteger {
+  cail::Field<std::uint64_t> value{.minimum = 9007199254740993ULL, .maximum = 9007199254740994ULL};
+};
+
+void test_constraint_validation() {
+  check(cail::from_json<BoundedInteger>(R"({"value":9007199254740993})").has_value() &&
+            cail::from_json<BoundedInteger>(R"({"value":9007199254740994})").has_value() &&
+            !cail::from_json<BoundedInteger>(R"({"value":9007199254740992})") &&
+            !cail::from_json<BoundedInteger>(R"({"value":9007199254740995})"),
+        "integer bounds retain precision beyond the exact range of double");
+  check(cail::from_json<double>("2").has_value(), "unconstrained numbers remain unrestricted");
+  for (const auto json : {R"({"score":0})", R"({"score":1})", R"({"score":0.5})"})
+    check(cail::from_json<BoundedValue>(json).has_value(), "numeric bounds are inclusive");
+  for (const auto json : {R"({"score":-0.1})", R"({"score":1.1})"}) {
+    const auto result = cail::from_json<BoundedValue>(json);
+    check(!result && result.error().code == cail::ErrorCode::schema_validation &&
+              result.error().message.starts_with("$.score:") &&
+              result.error().message.find(json == std::string_view{R"({"score":-0.1})"}
+                                              ? "minimum"
+                                              : "maximum") != std::string::npos,
+          "out-of-range values report the field and failed constraint");
+  }
+  check(cail::from_json<NestedBounds>(R"({"values":[{"score":0.5}],"extra":null})").has_value(),
+        "valid nested values and null optionals decode");
+  const auto array = cail::from_json<NestedBounds>(R"({"values":[{"score":0.5},{"score":2}]})");
+  check(!array && array.error().message.starts_with("$.values[1].score:"),
+        "array validation reports the failing element");
+  const auto optional = cail::from_json<NestedBounds>(R"({"values":[],"extra":{"score":-1}})");
+  check(!optional && optional.error().message.starts_with("$.extra.score:"),
+        "populated optionals validate nested fields");
+  check(cail::from_json<ValidationChoice>(R"("Yes")").has_value() &&
+            !cail::from_json<ValidationChoice>(R"("Maybe")"),
+        "enum decoding rejects unknown choices");
+
+  cail::LanguageModel model(
+      [](const cail::GenerationRequest&,
+         std::stop_token) -> cail::Result<cail::GenerationResponse> {
+        return cail::GenerationResponse{.text = R"({"score":2})"};
+      },
+      {}, {},
+      [](cail::GenerationRequest, cail::LanguageModel::GenerationCompletion complete,
+         std::stop_token) -> cail::Result<void> {
+        complete(cail::GenerationResponse{.text = R"({"score":2})"});
+        return {};
+      });
+  const auto generated = cail::generate_object<BoundedValue>({.model = model, .prompt = "score"});
+  check(!generated && generated.error().code == cail::ErrorCode::schema_validation,
+        "generated objects enforce numeric constraints");
+  std::promise<cail::Result<BoundedValue>> completed;
+  auto future = completed.get_future();
+  const auto started = cail::generate_object_async<BoundedValue>(
+      {.model = model, .prompt = "score"},
+      [&](cail::Result<BoundedValue> value) { completed.set_value(std::move(value)); });
+  check(started.has_value(), "async constrained generation starts");
+  if (started) {
+    const auto result = future.get();
+    check(!result && result.error().code == cail::ErrorCode::schema_validation,
+          "async generated objects enforce numeric constraints");
+  }
+
+  bool invoked = false;
+  auto tool =
+      cail::tool<BoundedValue, BoundedValue>("score", "Score", [&](const BoundedValue& input) {
+        invoked = true;
+        return input;
+      });
+  const cail::ToolCall call{.id = "invalid", .name = "score", .arguments = R"({"score":2})"};
+  const auto result = tool.execute(call, {});
+  check(!result && result.error().code == cail::ErrorCode::schema_validation && !invoked,
+        "invalid tool arguments never reach synchronous handlers");
+  auto async = cail::async_tool<BoundedValue, BoundedValue>(
+      "score", "Score", [&](BoundedValue input, cail::ToolContext, auto complete) {
+        invoked = true;
+        complete(std::move(input));
+      });
+  std::promise<cail::Result<std::string>> tool_completed;
+  auto tool_future = tool_completed.get_future();
+  const auto tool_started = async.execute_async(
+      call, {}, [&](auto output) { tool_completed.set_value(std::move(output)); });
+  check(tool_started.has_value(), "async constrained tool starts");
+  if (tool_started) {
+    const auto output = tool_future.get();
+    check(!output && output.error().code == cail::ErrorCode::schema_validation && !invoked,
+          "invalid tool arguments never reach asynchronous handlers");
+  }
+}
 
 void test_control_character_json() {
   std::string controls;
@@ -532,6 +631,7 @@ void test_async_transport_retries() {
 } // namespace test
 
 int main() {
+  test::test_constraint_validation();
   test::test_control_character_json();
   test::test_additional_properties_schema();
   test::test_field_value_api();

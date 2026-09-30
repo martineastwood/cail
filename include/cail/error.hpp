@@ -9,6 +9,7 @@ namespace cail {
 enum class ErrorCode {
   json_serialization,
   json_deserialization,
+  schema_validation,
   invalid_configuration,
   unsupported_schema,
   transport,

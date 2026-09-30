@@ -44,6 +44,12 @@ if (result && !result->tool_results.empty()) {
 The returned `GenerationResponse` contains each tool result as JSON. Decode it
 to the tool's declared output type with `decode_output`, as above.
 
+You can constrain numeric arguments with `cail::Field<T>::minimum` and
+`maximum`. CAIL checks these inclusive bounds before calling your handler,
+including asynchronous handlers. Invalid arguments return
+`ErrorCode::schema_validation` with the failing field path. See
+[Structured outputs](/guides/structured-output/) for a constrained field example.
+
 The model needs function calling support. A model without it may answer with
 text instead of a call, so check `result->tool_results` before decoding one.
 

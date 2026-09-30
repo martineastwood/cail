@@ -40,9 +40,21 @@ JSON conversion emits only the value, while schema inspection reads the
 metadata. To emit the generated JSON Schema yourself, call
 `cail::json_schema<Analysis>()`.
 
+Numeric bounds are inclusive. CAIL checks them locally when decoding JSON,
+including generated objects and typed tool arguments. A confidence of `1.5`
+returns `ErrorCode::schema_validation` with a message such as
+`$.confidence: value does not satisfy maximum.` Nested errors include the
+property path and array index, for example `$.results[1].confidence`.
+The same checks apply to synchronous and asynchronous calls.
+
+C++ enums restrict values to their named choices. An unknown choice returns
+`ErrorCode::json_deserialization`.
+
 When you define a schema directly rather than through fields, set
 `Schema::min_items` and `Schema::max_items` to limit array lengths, and
 `Schema::items` to describe each array value.
+These manually configured array limits are sent to the provider; CAIL does not
+check them locally during typed decoding.
 
 ## Request the object
 
