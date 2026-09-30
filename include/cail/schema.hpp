@@ -7,8 +7,10 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -36,6 +38,8 @@ struct Schema {
   std::optional<std::string> description;
   std::optional<double> minimum;
   std::optional<double> maximum;
+  std::optional<std::size_t> min_length;
+  std::optional<std::size_t> max_length;
   std::optional<std::vector<std::string>> enum_values;
   std::optional<std::map<std::string, std::shared_ptr<Schema>>> properties;
   std::optional<std::vector<std::string>> required;
@@ -103,6 +107,14 @@ template <typename T> [[nodiscard]] Schema make_schema(T& value) {
       }
     }
 
+    if constexpr (std::is_same_v<Underlying, std::string> ||
+                  std::is_same_v<Underlying, std::string_view>) {
+      result.min_length = value.min_length;
+      result.max_length = value.max_length;
+    } else if constexpr (is_vector_v<Underlying>) {
+      result.min_items = value.min_items;
+      result.max_items = value.max_items;
+    }
     return result;
   } else if constexpr (is_optional_v<Value>) {
     using Underlying = typename optional_traits<Value>::value_type;
@@ -212,7 +224,8 @@ namespace detail {
                                                                   std::string_view key) {
   if (value.is_number()) {
     const auto number = value.as<double>();
-    if (number < 0 || number != static_cast<double>(static_cast<std::size_t>(number))) {
+    if (!(number >= 0 && number < std::ldexp(1.0, std::numeric_limits<std::size_t>::digits)) ||
+        number != static_cast<double>(static_cast<std::size_t>(number))) {
       return std::unexpected(Error{
           .code = ErrorCode::json_deserialization,
           .message = "JSON Schema " + std::string{key} + " must be a non-negative integer",
@@ -272,6 +285,18 @@ namespace detail {
   }
   if (source.contains("maximum") && source["maximum"].is_number()) {
     result.maximum = source["maximum"].as<double>();
+  }
+  if (source.contains("minLength")) {
+    auto length = schema_size_from_generic(source["minLength"], "minLength");
+    if (!length)
+      return std::unexpected(length.error());
+    result.min_length = *length;
+  }
+  if (source.contains("maxLength")) {
+    auto length = schema_size_from_generic(source["maxLength"], "maxLength");
+    if (!length)
+      return std::unexpected(length.error());
+    result.max_length = *length;
   }
   if (source.contains("enum")) {
     const auto* values = source["enum"].get_if<glz::generic::array_t>();
@@ -380,9 +405,10 @@ template <> struct meta<cail::Schema> {
   using T = cail::Schema;
   static constexpr auto value =
       object(&T::type, "description", &T::description, "minimum", &T::minimum, "maximum",
-             &T::maximum, "enum", &T::enum_values, "properties", &T::properties, "required",
-             &T::required, "items", &T::items, "additionalProperties", &T::additional_properties,
-             "minItems", &T::min_items, "maxItems", &T::max_items);
+             &T::maximum, "minLength", &T::min_length, "maxLength", &T::max_length, "enum",
+             &T::enum_values, "properties", &T::properties, "required", &T::required, "items",
+             &T::items, "additionalProperties", &T::additional_properties, "minItems",
+             &T::min_items, "maxItems", &T::max_items);
 };
 
 } // namespace glz

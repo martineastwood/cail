@@ -17,6 +17,130 @@ namespace test {
 
 enum class ValidationChoice { Yes, No };
 
+struct Summary {
+  cail::Field<std::string> title{.min_length = 1, .max_length = 2};
+  cail::Field<std::vector<std::string>> highlights{.min_items = 1, .max_items = 2};
+};
+
+struct NestedSummary {
+  std::vector<Summary> summaries;
+  std::optional<Summary> extra;
+};
+
+struct EmptySummary {
+  cail::Field<std::string> title{.min_length = 0, .max_length = 0};
+  cail::Field<std::vector<std::string>> highlights{.min_items = 0, .max_items = 0};
+};
+
+void test_length_constraints() {
+  check(cail::from_json<EmptySummary>(R"({"title":"","highlights":[]})").has_value() &&
+            !cail::from_json<EmptySummary>(R"({"title":"a","highlights":[]})") &&
+            !cail::from_json<EmptySummary>(R"({"title":"","highlights":["one"]})"),
+        "zero length bounds are enforced rather than treated as absent");
+  check(cail::from_json<cail::Field<std::string>>(R"("unrestricted")").has_value() &&
+            cail::from_json<cail::Field<std::vector<int>>>("[]").has_value(),
+        "omitted length bounds leave strings and arrays unrestricted");
+  const auto schema = cail::schema<Summary>();
+  const auto& title = *schema.properties->at("title");
+  const auto& highlights = *schema.properties->at("highlights");
+  check(title.min_length == 1 && title.max_length == 2 && highlights.min_items == 1 &&
+            highlights.max_items == 2,
+        "typed fields emit string and array length constraints");
+  const auto encoded = cail::json_schema<Summary>();
+  const auto decoded = cail::schema_from_json(*encoded);
+  check(decoded && decoded->properties->at("title")->min_length == 1 &&
+            decoded->properties->at("title")->max_length == 2 &&
+            decoded->properties->at("highlights")->min_items == 1 &&
+            decoded->properties->at("highlights")->max_items == 2,
+        "length constraints survive JSON Schema round trips");
+  const auto strict = cail::detail::strict_json_schema(schema);
+  check(strict && strict->properties->at("title")->max_length == 2 &&
+            strict->properties->at("highlights")->max_items == 2,
+        "strict provider schemas preserve length constraints");
+  for (const auto json :
+       {R"({"title":"a","highlights":["one"]})", R"({"title":"ab","highlights":["one","two"]})",
+        R"({"title":"é😀","highlights":["one"]})",
+        R"({"title":"\u00e9\ud83d\ude00","highlights":["one"]})",
+        R"({"title":"e\u0301","highlights":["one"]})",
+        R"({"title":"\u0000","highlights":["one"]})"})
+    check(cail::from_json<Summary>(json).has_value(),
+          "inclusive string and array bounds count Unicode code points");
+  const std::vector<std::pair<std::string, std::string>> invalid{
+      {R"({"title":"","highlights":["one"]})", "$.title: value does not satisfy min_length."},
+      {R"({"title":"abc","highlights":["one"]})", "$.title: value does not satisfy max_length."},
+      {R"({"title":"a","highlights":[]})", "$.highlights: value does not satisfy min_items."},
+      {R"({"title":"a","highlights":["one","two","three"]})",
+       "$.highlights: value does not satisfy max_items."},
+  };
+  for (const auto& [json, message] : invalid) {
+    const auto result = cail::from_json<Summary>(json);
+    check(!result && result.error().code == cail::ErrorCode::schema_validation &&
+              result.error().message == message,
+          "length validation identifies the field and failed constraint");
+    cail::LanguageModel model(
+        [json](const cail::GenerationRequest&,
+               std::stop_token) -> cail::Result<cail::GenerationResponse> {
+          return cail::GenerationResponse{.text = json};
+        },
+        {}, {},
+        [json](cail::GenerationRequest, auto complete, std::stop_token) -> cail::Result<void> {
+          complete(cail::GenerationResponse{.text = json});
+          return {};
+        });
+    const auto generated = cail::generate_object<Summary>({.model = model, .prompt = "summarize"});
+    check(!generated && generated.error().message == message,
+          "generated objects enforce length constraints");
+    std::promise<cail::Result<Summary>> completion;
+    auto future = completion.get_future();
+    const auto started = cail::generate_object_async<Summary>(
+        {.model = model, .prompt = "summarize"},
+        [&](auto output) { completion.set_value(std::move(output)); });
+    check(started.has_value(), "async length-constrained generation starts");
+    if (started) {
+      const auto output = future.get();
+      check(!output && output.error().message == message,
+            "async generated objects enforce length constraints");
+    }
+    bool invoked = false;
+    auto tool = cail::tool<Summary, Summary>("summary", "Summary", [&](const Summary& input) {
+      invoked = true;
+      return input;
+    });
+    const cail::ToolCall call{.name = "summary", .arguments = json};
+    const auto output = tool.execute(call, {});
+    check(!output && output.error().message == message && !invoked,
+          "invalid lengths never reach synchronous tool handlers");
+    auto async = cail::async_tool<Summary, Summary>(
+        "summary", "Summary", [&](Summary input, cail::ToolContext, auto complete) {
+          invoked = true;
+          complete(std::move(input));
+        });
+    std::promise<cail::Result<std::string>> tool_completion;
+    auto tool_future = tool_completion.get_future();
+    const auto tool_started = async.execute_async(
+        call, {}, [&](auto value) { tool_completion.set_value(std::move(value)); });
+    check(tool_started.has_value(), "async length-constrained tool starts");
+    if (tool_started) {
+      const auto value = tool_future.get();
+      check(!value && value.error().message == message && !invoked,
+            "invalid lengths never reach asynchronous tool handlers");
+    }
+  }
+  const auto nested =
+      cail::from_json<NestedSummary>(R"({"summaries":[{"title":"abc","highlights":["one"]}]})");
+  check(!nested && nested.error().message.starts_with("$.summaries[0].title:"),
+        "nested length errors include the array index");
+  const auto optional =
+      cail::from_json<NestedSummary>(R"({"summaries":[],"extra":{"title":"a","highlights":[]}})");
+  check(!optional && optional.error().message.starts_with("$.extra.highlights:"),
+        "optional nested values enforce array lengths");
+  for (const auto keyword : {"minLength", "maxLength"})
+    for (const auto value : {"-1", "1.5", "1e100", "null", "true", R"("2")"})
+      check(!cail::schema_from_json(std::string{R"({"type":"string",")"} + keyword + "\":" + value +
+                                    "}"),
+            "schema length constraints require nonnegative integers");
+}
+
 struct BoundedValue {
   cail::Field<double> score{.minimum = 0.0, .maximum = 1.0};
 };
@@ -631,6 +755,7 @@ void test_async_transport_retries() {
 } // namespace test
 
 int main() {
+  test::test_length_constraints();
   test::test_constraint_validation();
   test::test_control_character_json();
   test::test_additional_properties_schema();

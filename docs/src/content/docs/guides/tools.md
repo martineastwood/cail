@@ -45,7 +45,8 @@ The returned `GenerationResponse` contains each tool result as JSON. Decode it
 to the tool's declared output type with `decode_output`, as above.
 
 You can constrain numeric arguments with `cail::Field<T>::minimum` and
-`maximum`. CAIL checks these inclusive bounds before calling your handler,
+`maximum`, strings with `min_length` and `max_length`, and vectors with
+`min_items` and `max_items`. CAIL checks these inclusive bounds before calling your handler,
 including asynchronous handlers. Invalid arguments return
 `ErrorCode::schema_validation` with the failing field path. See
 [Structured outputs](/guides/structured-output/) for a constrained field example.

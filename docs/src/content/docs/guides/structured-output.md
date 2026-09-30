@@ -52,10 +52,50 @@ callback, and coroutine (`co_await generate_object_async`) calls.
 C++ enums restrict values to their named choices. An unknown choice returns
 `ErrorCode::json_deserialization`.
 
+### Limit string and array lengths
+
+You can require a nonempty title and limit the number of highlights:
+
+```cpp
+struct Summary {
+    cail::Field<std::string> title{
+        .min_length = 1,
+        .max_length = 120,
+    };
+    cail::Field<std::vector<std::string>> highlights{
+        .min_items = 1,
+        .max_items = 5,
+    };
+};
+
+auto summary = cail::generate_object<Summary>({
+    .model = cail::openai("gpt-6-luna"),
+    .prompt = "Summarize this release: faster search, saved filters, and CSV export.",
+});
+if (!summary) {
+    std::cerr << summary.error().message << '\n';
+}
+```
+
+Include `<string>`, `<vector>`, and `<iostream>` alongside your CAIL headers.
+All length bounds are inclusive, and zero is allowed. Omit a bound to leave
+that limit unrestricted. Use `min_length` and `max_length` on string fields,
+and `min_items` and `max_items` on vector fields.
+
+String length counts Unicode code points, rather than UTF-8 bytes or visible
+characters. For example, `é` and `😀` each count as one code point, while an
+`e` followed by a combining accent counts as two.
+
+CAIL sends these limits as `minLength`, `maxLength`, `minItems`, and `maxItems`
+in JSON Schema and checks them locally when decoding typed values. Invalid
+values return `ErrorCode::schema_validation`, for example
+`$.highlights: value does not satisfy max_items.` These checks also apply to
+typed tool arguments and asynchronous generation.
+
 When you define a schema directly rather than through fields, set
-`Schema::min_items` and `Schema::max_items` to limit array lengths, and
-`Schema::items` to describe each array value.
-These manually configured array limits are sent to the provider; CAIL does not
+`Schema::min_length` and `Schema::max_length` for strings, or `Schema::min_items`
+and `Schema::max_items` for arrays. Use `Schema::items` to describe each array
+value. These manually configured limits are sent to the provider; CAIL does not
 check them locally during typed decoding.
 
 ## Request the object
