@@ -38,22 +38,29 @@ cail::GenerationRequest prompt() {
           }}};
 }
 
-cail::Task<void> coroutine_http(std::string base) {
-  auto model = cail::create_local({.endpoint = base + "/chat"})("test-model");
+cail::Task<void> coroutine_http_generation(cail::LanguageModel model) {
   const auto thread = std::this_thread::get_id();
   const auto response = co_await cail::generate_text_async({.model = model, .prompt = "Hello"});
   check(response && response->text == "Hello" && std::this_thread::get_id() == thread,
         "coroutine generation awaits live HTTP and resumes on its caller executor");
+}
+
+cail::Task<void> coroutine_http_stream(cail::LanguageModel model) {
+  const auto thread = std::this_thread::get_id();
   std::string text;
-  const auto streamed = co_await cail::stream_text_async(
-      {.model = model, .prompt = "Hello"}, [&](const cail::StreamEvent& event) {
-        check(std::this_thread::get_id() == thread,
-              "live coroutine SSE events run on the caller executor");
-        if (const auto* delta = std::get_if<cail::TextDelta>(&event))
-          text += delta->text;
-      });
+  auto on_event = [&](const cail::StreamEvent& event) {
+    check(std::this_thread::get_id() == thread,
+          "live coroutine SSE events run on the caller executor");
+    if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+      text += delta->text;
+  };
+  const auto streamed =
+      co_await cail::stream_text_async({.model = model, .prompt = "Hello"}, on_event);
   check(streamed && text == "Hi",
         "coroutine streaming delivers live events before its final response");
+}
+
+cail::Task<void> coroutine_http_tools(std::string base) {
   auto count =
       cail::tool<CountInput, int>("count", "Count characters", [](const CountInput& input) {
         return static_cast<int>(input.query.size());
@@ -64,13 +71,25 @@ cail::Task<void> coroutine_http(std::string base) {
        .tools = {count}});
   check(tools && tools->text == "Done" && tools->tool_results.size() == 1,
         "coroutine generation awaits the whole live tool loop");
-  cail::Agent agent({.model = model,
-                     .memory = std::make_shared<cail::InMemoryConversationMemory>(),
-                     .conversation_id = "coroutine"});
-  const auto first = co_await agent.generate_async("Hello");
-  const auto second = co_await agent.generate_async("Again");
-  check(first && second,
-        "sequential coroutine agent calls await native HTTP and memory persistence");
+}
+
+cail::Task<void> coroutine_agent_call(cail::Agent& agent, std::string prompt_text) {
+  const auto response = co_await agent.generate_async(std::move(prompt_text));
+  check(response.has_value(), "sequential coroutine agent calls await HTTP and memory persistence");
+}
+
+void coroutine_http(const std::string& base) {
+  auto model = cail::create_local({.endpoint = base + "/chat"})("test-model");
+  cail::run(coroutine_http_generation(model));
+  cail::run(coroutine_http_stream(model));
+  cail::run(coroutine_http_tools(base));
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  cail::Agent agent({.model = model, .memory = memory, .conversation_id = "coroutine"});
+  cail::run(coroutine_agent_call(agent, "Hello"));
+  cail::run(coroutine_agent_call(agent, "Again"));
+  const auto history = memory->load("coroutine");
+  check(history && history->size() == 4,
+        "coroutine agent calls persist both completed conversation turns");
 }
 
 } // namespace
@@ -648,7 +667,7 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - began < std::chrono::seconds(2),
         "Chat Completions cancels the live HTTP stream");
 
-  cail::run(coroutine_http(base));
+  coroutine_http(base);
 
   return failures == 0 ? 0 : 1;
 }
