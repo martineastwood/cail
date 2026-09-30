@@ -1,5 +1,7 @@
 #include "test_support.hpp"
 
+#include <future>
+
 #include <cail/cail.hpp>
 
 #include <array>
@@ -203,12 +205,15 @@ void test_step_usage() {
     } else if (execution == 1) {
       response = cail::stream_text(options, [](const cail::StreamEvent&) {});
     } else {
+      std::promise<cail::Result<cail::GenerationResponse>> completed;
+      auto pending = completed.get_future();
       check(cail::generate_text_async(options,
                                       [&](cail::Result<cail::GenerationResponse> result) {
-                                        response = std::move(result);
+                                        completed.set_value(std::move(result));
                                       })
                 .has_value(),
             "async tool loop starts");
+      response = pending.get();
     }
     check(response && *response && (*response)->steps.size() == 3 && (*response)->usage &&
               (*response)->usage->input_tokens == 5 && (*response)->total_usage &&

@@ -510,81 +510,38 @@ public:
                                                std::move(complete), stop, decode_http_response);
   }
 
-private:
-  [[nodiscard]] static Result<GenerationResponse>
-  decode_http_response(const HttpResponse& response) {
-    const auto context = [&](Error error) {
-      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
-    };
-    if (is_http_error_status(response.status_code))
-      return context(http_status_error_from_json_body(response));
-    ResponseBody parsed;
-    if (const auto error =
-            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
-        error)
-      return context(Error{.code = ErrorCode::provider_response,
-                           .message = glz::format_error(error, response.body)});
-    auto result = decode(parsed);
-    return result ? result : context(result.error());
-  }
-
-  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
-                                                      bool streaming) const {
-    if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
-        (config_.max_tokens == 0 && !request.max_output_tokens) || !transport_) {
-      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                   .message = "Anthropic requires an API key, model, base URL, "
-                                              "positive max_tokens, and transport."});
-    }
-    auto body = encode(request, config_, streaming);
-    if (!body)
-      return std::unexpected(body.error());
-    auto encoded = to_json(*body);
-    if (!encoded)
-      return std::unexpected(encoded.error());
-    encoded = apply_message_options(*encoded, request);
-    if (!encoded)
-      return std::unexpected(encoded.error());
-    if (!request.provider_options.empty()) {
-      auto merged = merge_json_objects(*encoded, request.provider_options);
-      if (!merged)
-        return std::unexpected(merged.error());
-      encoded = std::move(*merged);
-    }
-    HttpRequest http{
-        .url = config_.base_url + "/messages",
-        .headers = config_.headers,
-        .body = std::move(*encoded),
-    };
-    cail::detail::append_session_header(http.headers, config_.request_session_header,
-                                        request.session_id);
-    http.headers.push_back({.name = "x-api-key", .value = config_.api_key});
-    http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
-    http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
-    http.headers.push_back({.name = "Content-Type", .value = "application/json"});
-    if (streaming)
-      http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
-    if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
-      return std::unexpected(middleware.error());
-    }
-    return http;
-  }
-
-  [[nodiscard]] Result<GenerationResponse>
-  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
+  [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          std::stop_token stop = {}) const {
+    if (!on_event || !complete)
+      return std::unexpected(
+          Error{.code = ErrorCode::invalid_configuration,
+                .message = "Async streaming requires event and completion handlers."});
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
-    auto prepared = make_http_request(request, static_cast<bool>(on_event));
-    if (!prepared)
-      return std::unexpected(prepared.error());
-    auto http = std::move(*prepared);
+    auto http = make_http_request(request, true);
+    if (!http)
+      return std::unexpected(http.error());
+    auto state = std::make_shared<StreamState>();
+    state->on_event = std::move(on_event);
+    state->stop = stop;
+    return cail::detail::stream_generation_async(
+        *transport_, std::move(request), std::move(*http),
+        [state](std::string_view bytes) { state->feed(bytes); }, std::move(complete), stop,
+        [state](const HttpResponse& response) { return state->finish(response); });
+  }
+
+private:
+  struct StreamState {
+    StreamHandler on_event;
+    std::stop_token stop;
     cail::detail::SseParser parser;
     GenerationResponse partial;
     std::map<std::size_t, cail::ToolCall> pending_calls;
     std::map<std::size_t, ThinkingBlock> thinking_blocks;
     bool finished = false;
     std::optional<Error> stream_error;
-    const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
+    void handle_event(const cail::detail::ServerSentEvent& event) {
       if (stop.stop_requested() || stream_error || event.data.empty())
         return;
       StreamBody chunk;
@@ -674,41 +631,117 @@ private:
       } else if (chunk.type == "message_stop") {
         finished = true;
       }
+    }
+    void feed(std::string_view bytes) {
+      parser.feed(bytes, [this](const auto& event) { handle_event(event); });
+    }
+    Result<GenerationResponse> finish(const HttpResponse& response) {
+      if (stop.stop_requested())
+        return std::unexpected(generation_cancelled_error());
+      const auto context = [&](Error error) {
+        return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+      };
+      if (is_http_error_status(response.status_code)) {
+        return context(http_status_error_from_json_body(response));
+      }
+      parser.finish([this](const auto& event) { handle_event(event); });
+      if (stream_error)
+        return context(*stream_error);
+      if (!finished || !pending_calls.empty())
+        return context(
+            Error{.code = ErrorCode::provider_response,
+                  .message =
+                      "Anthropic closed the stream before message_stop or a completed tool call."});
+      std::vector<ThinkingBlock> thinking;
+      for (const auto& [index, block] : thinking_blocks)
+        thinking.push_back(block);
+      if (auto retained = retain_thinking(partial, thinking); !retained)
+        return context(retained.error());
+      return partial;
+    }
+  };
+
+  [[nodiscard]] static Result<GenerationResponse>
+  decode_http_response(const HttpResponse& response) {
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
     };
-    auto response =
-        on_event
-            ? transport_->stream(
-                  http, [&](std::string_view bytes) { parser.feed(bytes, handle_event); }, stop)
-            : transport_->send(http, stop);
-    if (!response)
-      return std::unexpected(response.error());
-    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+    if (is_http_error_status(response.status_code))
+      return context(http_status_error_from_json_body(response));
+    ResponseBody parsed;
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
+        error)
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = glz::format_error(error, response.body)});
+    auto result = decode(parsed);
+    return result ? result : context(result.error());
+  }
+
+  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
+                                                      bool streaming) const {
+    if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
+        (config_.max_tokens == 0 && !request.max_output_tokens) || !transport_) {
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Anthropic requires an API key, model, base URL, "
+                                              "positive max_tokens, and transport."});
+    }
+    auto body = encode(request, config_, streaming);
+    if (!body)
+      return std::unexpected(body.error());
+    auto encoded = to_json(*body);
+    if (!encoded)
+      return std::unexpected(encoded.error());
+    encoded = apply_message_options(*encoded, request);
+    if (!encoded)
+      return std::unexpected(encoded.error());
+    if (!request.provider_options.empty()) {
+      auto merged = merge_json_objects(*encoded, request.provider_options);
+      if (!merged)
+        return std::unexpected(merged.error());
+      encoded = std::move(*merged);
+    }
+    HttpRequest http{
+        .url = config_.base_url + "/messages",
+        .headers = config_.headers,
+        .body = std::move(*encoded),
+    };
+    cail::detail::append_session_header(http.headers, config_.request_session_header,
+                                        request.session_id);
+    http.headers.push_back({.name = "x-api-key", .value = config_.api_key});
+    http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
+    http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
+    http.headers.push_back({.name = "Content-Type", .value = "application/json"});
+    if (streaming)
+      http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
+    if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
       return std::unexpected(middleware.error());
     }
+    return http;
+  }
 
+  [[nodiscard]] Result<GenerationResponse>
+  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
-    const auto context = [&](Error error) {
-      return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
-    };
-    if (is_http_error_status(response->status_code)) {
-      return context(http_status_error_from_json_body(*response));
-    }
-    if (!on_event)
-      return decode_http_response(*response);
-    parser.finish(handle_event);
-    if (stream_error)
-      return context(*stream_error);
-    if (!finished || !pending_calls.empty())
-      return context(Error{
-          .code = ErrorCode::provider_response,
-          .message = "Anthropic closed the stream before message_stop or a completed tool call."});
-    std::vector<ThinkingBlock> thinking;
-    for (const auto& [index, block] : thinking_blocks)
-      thinking.push_back(block);
-    if (auto retained = retain_thinking(partial, thinking); !retained)
-      return context(retained.error());
-    return partial;
+    auto prepared = make_http_request(request, static_cast<bool>(on_event));
+    if (!prepared)
+      return std::unexpected(prepared.error());
+    auto http = std::move(*prepared);
+    StreamState state;
+    state.on_event = on_event;
+    state.stop = stop;
+    auto response = on_event
+                        ? transport_->stream(
+                              http, [&state](std::string_view bytes) { state.feed(bytes); }, stop)
+                        : transport_->send(http, stop);
+    if (!response)
+      return std::unexpected(response.error());
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware)
+      return std::unexpected(middleware.error());
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    return on_event ? state.finish(*response) : decode_http_response(*response);
   }
 
   Config config_;
@@ -759,6 +792,15 @@ public:
                  std::stop_token stop) {
           return client->generate_async(
               std::move(request),
+              [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+                complete(std::move(result));
+              },
+              stop);
+        },
+        [client](GenerationRequest request, StreamHandler handler,
+                 LanguageModel::GenerationCompletion complete, std::stop_token stop) {
+          return client->stream_async(
+              std::move(request), std::move(handler),
               [client, complete = std::move(complete)](Result<GenerationResponse> result) {
                 complete(std::move(result));
               },

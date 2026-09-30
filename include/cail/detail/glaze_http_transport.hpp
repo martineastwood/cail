@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cail/detail/asio.hpp>
 #include <cail/http.hpp>
 
 #include <glaze/net/http_client.hpp>
@@ -19,25 +20,32 @@
 
 namespace cail::detail {
 
-#if defined(GLZ_USING_BOOST_ASIO)
-namespace asio = glz::asio;
-#else
-namespace asio = ::asio;
-#endif
+inline thread_local bool on_glaze_io_thread = false;
 
 struct GlazeIoRuntime {
   asio::io_context context;
   asio::executor_work_guard<asio::io_context::executor_type> work{asio::make_work_guard(context)};
-  std::jthread first{[this] { context.run(); }};
-  std::jthread second{[this] { context.run(); }};
+  std::stop_source stop;
+  std::jthread first{[this] {
+    on_glaze_io_thread = true;
+    context.run();
+  }};
+  std::jthread second{[this] {
+    on_glaze_io_thread = true;
+    context.run();
+  }};
 
   ~GlazeIoRuntime() {
+    stop.request_stop();
+    async_worker_registry().shutdown();
     work.reset();
-    context.stop();
+    first.join();
+    second.join();
   }
 };
 
 [[nodiscard]] inline GlazeIoRuntime& glaze_io_runtime() {
+  (void)async_worker_registry();
   static GlazeIoRuntime runtime;
   return runtime;
 }
@@ -45,12 +53,14 @@ struct GlazeIoRuntime {
 class GlazeHttpTransport final : public HttpTransport {
 public:
   GlazeHttpTransport()
-      : client_(std::make_shared<glz::http_client>(glaze_io_runtime().context.get_executor())) {
+      : client_(std::make_shared<glz::http_client>(asio::make_strand(glaze_io_runtime().context))) {
     client_->set_graceful_ssl_shutdown(false);
   }
 
   [[nodiscard]] Result<HttpResponse> send(const HttpRequest& request,
                                           std::stop_token stop) override {
+    if (on_glaze_io_thread)
+      return blocking_callback_error();
     auto done = std::make_shared<std::promise<Result<HttpResponse>>>();
     auto future = done->get_future();
     send_async(
@@ -59,199 +69,162 @@ public:
   }
 
   void send_async(HttpRequest request, HttpCompletion complete, std::stop_token stop) override {
-    if (stop.stop_requested()) {
-      complete(std::unexpected(http_request_cancelled_error()));
-      return;
-    }
+    start_request(std::move(request), {}, std::move(complete), stop);
+  }
 
-    struct State {
-      std::mutex mutex;
-      HttpResponse response;
-      std::optional<std::error_code> error;
-      std::shared_ptr<glz::http_stream_connection> connection;
-      HttpCompletion complete;
-      std::stop_token stop;
-      std::optional<std::stop_callback<std::function<void()>>> cancel;
-      std::atomic<bool> finished{false};
-
-      void finish() {
-        if (finished.exchange(true)) {
-          return;
-        }
-        Result<HttpResponse> result;
-        {
-          std::lock_guard lock(mutex);
-          if (stop.stop_requested()) {
-            result = std::unexpected(http_request_cancelled_error());
-          } else if (error) {
-            result =
-                std::unexpected(Error{.code = ErrorCode::transport, .message = error->message()});
-          } else {
-            result = std::move(response);
-          }
-          connection.reset();
-        }
-        complete(std::move(result));
-      }
-    };
-
-    auto state = std::make_shared<State>();
-    state->complete = std::move(complete);
-    state->stop = stop;
-    glz::http_headers headers;
-    for (const auto& header : request.headers) {
-      headers.add(header.name, header.value);
-    }
-    const auto executor = client_->get_executor();
-    glz::stream_request_params_v2 params{
-        .method = std::move(request.method),
-        .url = std::move(request.url),
-        .timeout = request.timeout,
-        .strategy = glz::stream_read_strategy::immediate_delivery,
-        .body = std::move(request.body),
-        .headers = std::move(headers),
-        .on_data =
-            [state](std::string_view bytes) {
-              std::lock_guard lock(state->mutex);
-              state->response.body.append(bytes);
-            },
-        .on_error =
-            [state](std::error_code error) {
-              std::lock_guard lock(state->mutex);
-              state->error = error;
-            },
-        .on_progress = [stop](std::size_t, std::size_t) { return !stop.stop_requested(); },
-        .on_connect =
-            [state](const glz::response& response) {
-              std::lock_guard lock(state->mutex);
-              state->response.status_code = response.status_code;
-              for (const auto& [name, value] : response.response_headers) {
-                state->response.headers.push_back({.name = name, .value = value});
-              }
-            },
-        .on_disconnect = [state, executor] { asio::post(executor, [state] { state->finish(); }); },
-        .status_is_error = [](int) { return false; },
-    };
-
-    auto connection = client_->stream_request_v2(params);
-    if (!connection) {
-      {
-        std::lock_guard lock(state->mutex);
-        state->error = std::make_error_code(std::errc::invalid_argument);
-      }
-      state->finish();
-      return;
-    }
-    {
-      std::lock_guard lock(state->mutex);
-      if (!state->finished.load()) {
-        state->connection = connection;
-      }
-    }
-    state->cancel.emplace(stop, [connection = std::weak_ptr(connection)] {
-      if (auto active = connection.lock()) {
-        active->disconnect();
-      }
-    });
+  void stream_async(HttpRequest request, HttpDataHandler on_data, HttpCompletion complete,
+                    std::stop_token stop) override {
+    start_request(std::move(request), std::move(on_data), std::move(complete), stop, true);
   }
 
   [[nodiscard]] Result<HttpResponse> stream(const HttpRequest& request,
                                             const HttpDataHandler& on_data,
                                             std::stop_token stop) override {
-    if (stop.stop_requested()) {
-      return std::unexpected(
-          Error{.code = ErrorCode::cancelled, .message = "The HTTP stream was cancelled."});
-    }
-    struct State {
-      HttpResponse response;
-      std::optional<std::error_code> error;
-      std::exception_ptr callback_error;
-      std::promise<void> disconnected;
-      std::once_flag finish;
-    };
-
-    auto state = std::make_shared<State>();
-    auto done = state->disconnected.get_future();
-    glz::http_headers headers;
-    for (const auto& header : request.headers) {
-      headers.add(header.name, header.value);
-    }
-
-    glz::stream_request_params_v2 params{
-        .method = request.method,
-        .url = request.url,
-        .timeout = request.timeout,
-        .strategy = glz::stream_read_strategy::immediate_delivery,
-        .body = request.body,
-        .headers = std::move(headers),
-        .on_data =
-            [state, on_data, stop](std::string_view bytes) {
-              if (state->response.status_code >= 400) {
-                state->response.body.append(bytes);
-                return;
-              }
-              if (!stop.stop_requested() && !state->callback_error && on_data) {
-                try {
-                  on_data(bytes);
-                } catch (...) {
-                  state->callback_error = std::current_exception();
-                }
-              }
-            },
-        .on_error =
-            [state](std::error_code error) {
-              if (state->response.status_code < 400) {
-                state->error = error;
-              }
-            },
-        .on_progress =
-            [state, stop](std::size_t, std::size_t) {
-              return !stop.stop_requested() && !state->callback_error;
-            },
-        .on_connect =
-            [state](const glz::response& response) {
-              state->response.status_code = response.status_code;
-              state->response.headers.reserve(response.response_headers.size());
-              for (const auto& [name, value] : response.response_headers) {
-                state->response.headers.push_back(HttpHeader{.name = name, .value = value});
-              }
-            },
-        .on_disconnect =
-            [state] {
-              std::call_once(state->finish, [state] { state->disconnected.set_value(); });
-            },
-        .status_is_error = [](int) { return false; },
-    };
-
-    auto connection = client_->stream_request_v2(params);
-    if (!connection) {
-      return std::unexpected(Error{
-          .code = ErrorCode::transport,
-          .message = "Glaze could not start the HTTP stream.",
-      });
-    }
-    std::stop_callback cancel_on_stop(stop, [connection] { connection->disconnect(); });
-    done.wait();
-    if (stop.stop_requested()) {
-      return std::unexpected(
-          Error{.code = ErrorCode::cancelled, .message = "The HTTP stream was cancelled."});
-    }
-    if (state->callback_error) {
-      return std::unexpected(Error{
-          .code = ErrorCode::transport,
-          .message = "The HTTP stream callback threw an exception.",
-      });
-    }
-    if (state->error) {
-      return std::unexpected(Error{
-          .code = ErrorCode::transport,
-          .message = state->error->message(),
-      });
-    }
-    return std::move(state->response);
+    if (on_glaze_io_thread)
+      return blocking_callback_error();
+    auto done = std::make_shared<std::promise<Result<HttpResponse>>>();
+    auto future = done->get_future();
+    start_request(
+        request, on_data,
+        [done](Result<HttpResponse> result) { done->set_value(std::move(result)); }, stop, true);
+    return future.get();
   }
 
 private:
+  struct Operation : std::enable_shared_from_this<Operation> {
+    std::shared_ptr<glz::http_client> client;
+    HttpResponse response;
+    std::optional<std::error_code> error;
+    std::exception_ptr callback_error;
+    std::shared_ptr<glz::http_stream_connection> connection;
+    HttpDataHandler on_data;
+    HttpCompletion complete;
+    std::stop_token stop;
+    std::unique_ptr<LinkedStop> linked_stop;
+    std::optional<std::stop_callback<std::function<void()>>> cancel;
+    bool streaming{};
+    bool finished{};
+
+    // All operation state and socket operations run on the client's strand.
+    void finish() {
+      if (std::exchange(finished, true))
+        return;
+      Result<HttpResponse> result;
+      if (stop.stop_requested())
+        result = std::unexpected(http_request_cancelled_error());
+      else if (callback_error)
+        result = std::unexpected(Error{.code = ErrorCode::transport,
+                                       .message = "The HTTP stream callback threw an exception."});
+      else if (error)
+        result = std::unexpected(Error{.code = ErrorCode::transport, .message = error->message()});
+      else
+        result = std::move(response);
+      connection.reset();
+      cancel.reset();
+      complete(std::move(result));
+    }
+
+    void start(HttpRequest request) {
+      if (finished)
+        return;
+      const auto executor = client->get_executor();
+      cancel.emplace(stop, [weak = weak_from_this(), executor] {
+        asio::post(executor, [weak] {
+          if (auto active = weak.lock(); active && !active->finished) {
+            if (active->connection)
+              active->connection->disconnect();
+            else
+              active->finish();
+          }
+        });
+      });
+      if (stop.stop_requested()) {
+        finish();
+        return;
+      }
+      auto self = shared_from_this();
+      glz::http_headers headers;
+      for (const auto& header : request.headers)
+        headers.add(header.name, header.value);
+      glz::stream_request_params_v2 params{
+          .method = std::move(request.method),
+          .url = std::move(request.url),
+          .timeout = request.timeout,
+          .strategy = glz::stream_read_strategy::immediate_delivery,
+          .body = std::move(request.body),
+          .headers = std::move(headers),
+          .on_data =
+              [self](std::string_view bytes) {
+                if (self->finished)
+                  return;
+                if (!self->streaming || self->response.status_code < 200 ||
+                    self->response.status_code >= 300) {
+                  self->response.body.append(bytes);
+                } else if (!self->stop.stop_requested() && !self->callback_error && self->on_data) {
+                  try {
+                    self->on_data(bytes);
+                  } catch (...) {
+                    self->callback_error = std::current_exception();
+                  }
+                }
+              },
+          .on_error =
+              [self](std::error_code error) {
+                if (!self->finished)
+                  self->error = error;
+              },
+          .on_progress =
+              [self](std::size_t, std::size_t) {
+                return !self->stop.stop_requested() && !self->callback_error;
+              },
+          .on_connect =
+              [self](const glz::response& response) {
+                if (self->finished)
+                  return;
+                self->response.status_code = response.status_code;
+                for (const auto& [name, value] : response.response_headers)
+                  self->response.headers.push_back({.name = name, .value = value});
+              },
+          .on_disconnect =
+              [self] { asio::post(self->client->get_executor(), [self] { self->finish(); }); },
+          .status_is_error = [](int) { return false; },
+      };
+      try {
+        connection = client->stream_request_v2(params);
+        if (!connection) {
+          error = std::make_error_code(std::errc::invalid_argument);
+          finish();
+        }
+      } catch (...) {
+        error = std::make_error_code(std::errc::io_error);
+        finish();
+      }
+    }
+  };
+
+  void start_request(HttpRequest request, HttpDataHandler on_data, HttpCompletion complete,
+                     std::stop_token stop, bool streaming = false) {
+    auto operation = std::make_shared<Operation>();
+    operation->client = client_;
+    operation->on_data = std::move(on_data);
+    operation->complete = complete_once<HttpResponse>(std::move(complete));
+    operation->linked_stop =
+        std::make_unique<LinkedStop>(stop, glaze_io_runtime().stop.get_token());
+    operation->stop = operation->linked_stop->source.get_token();
+    operation->streaming = streaming;
+    const auto executor = client_->get_executor();
+    asio::post(executor, [operation, request = std::move(request)]() mutable {
+      operation->start(std::move(request));
+    });
+  }
+
+  [[nodiscard]] static Result<HttpResponse> blocking_callback_error() {
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message =
+                                     "Blocking HTTP requests cannot run inside an HTTP callback. "
+                                     "Start an async request instead."});
+  }
+
   std::shared_ptr<glz::http_client> client_;
 };
 

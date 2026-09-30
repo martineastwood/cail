@@ -3,9 +3,10 @@
 #include <chrono>
 #include <future>
 #include <iostream>
-#include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -14,6 +15,10 @@
 #elif defined(__linux__)
 #include <fstream>
 #endif
+
+struct CountInput {
+  std::string query;
+};
 
 namespace {
 
@@ -34,14 +39,17 @@ ProcessSize process_size() {
   ProcessSize size;
   std::string name;
   std::size_t value;
-  while (status >> name >> value) {
+  std::string line;
+  while (std::getline(status, line)) {
+    std::istringstream fields(line);
+    if (!(fields >> name >> value))
+      continue;
     if (name == "Threads:") {
       size.threads = value;
     }
     if (name == "VmRSS:") {
       size.resident_bytes = value * 1024;
     }
-    status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
   }
   return size;
 #endif
@@ -59,6 +67,40 @@ std::string connection_id(const cail::HttpResponse& response) {
     }
   }
   return {};
+}
+
+template <typename Start> bool measure(std::string_view name, int count, Start start) {
+  auto peak = process_size();
+  std::jthread sampler([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      const auto size = process_size();
+      peak.threads = std::max(peak.threads, size.threads);
+      peak.resident_bytes = std::max(peak.resident_bytes, size.resident_bytes);
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+  });
+  std::vector<std::future<cail::Result<cail::GenerationResponse>>> pending;
+  const auto began = std::chrono::steady_clock::now();
+  for (int i = 0; i < count; ++i) {
+    auto completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+    pending.push_back(completion->get_future());
+    if (!start([completion](auto response) { completion->set_value(std::move(response)); }))
+      return false;
+  }
+  const auto launched = std::chrono::steady_clock::now();
+  for (auto& response : pending)
+    if (!response.get())
+      return false;
+  const auto finished = std::chrono::steady_clock::now();
+  sampler.request_stop();
+  sampler.join();
+  using milliseconds = std::chrono::milliseconds;
+  std::cout << name << " launch_ms "
+            << std::chrono::duration_cast<milliseconds>(launched - began).count() << " total_ms "
+            << std::chrono::duration_cast<milliseconds>(finished - began).count()
+            << " peak_threads " << peak.threads << " peak_resident_bytes " << peak.resident_bytes
+            << '\n';
+  return true;
 }
 
 } // namespace
@@ -80,28 +122,31 @@ int main(int argc, char** argv) {
   }
   const auto blocking_end = std::chrono::steady_clock::now();
 
-  std::vector<std::future<cail::Result<cail::GenerationResponse>>> pending;
-  const auto async_start = std::chrono::steady_clock::now();
-  for (int index = 0; index < 64; ++index) {
-    auto completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
-    pending.push_back(completion->get_future());
-    auto started = model.generate_async(
-        prompt(), [completion](cail::Result<cail::GenerationResponse> response) {
-          completion->set_value(std::move(response));
-        });
-    if (!started) {
-      return 4;
-    }
-  }
-  const auto launched = std::chrono::steady_clock::now();
-  const auto in_flight = process_size();
-  for (auto& result : pending) {
-    auto response = result.get();
-    if (!response || response->text != "Hello") {
-      return 5;
-    }
-  }
-  const auto async_end = std::chrono::steady_clock::now();
+  if (!measure("model_async_64", 64,
+               [&](auto complete) { return model.generate_async(prompt(), std::move(complete)); }))
+    return 4;
+  if (!measure("text_async_64", 64, [&](auto complete) {
+        return cail::generate_text_async({.model = model, .prompt = "Hello"}, std::move(complete));
+      }))
+    return 5;
+
+  auto tool_model = cail::create_local({.endpoint = base + "/async/tool-chat"})("test-model");
+  auto count = cail::tool<CountInput, int>("count", "Count", [](const CountInput& input) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    return static_cast<int>(input.query.size());
+  });
+  if (!measure("tools_async_64", 64, [&](auto complete) {
+        return cail::generate_text_async(
+            {.model = tool_model, .prompt = "count abc", .tools = {count}}, std::move(complete));
+      }))
+    return 5;
+
+  auto stream_model = cail::create_local({.endpoint = base + "/chat"})("test-model");
+  if (!measure("streams_async_64", 64, [&](auto complete) {
+        return cail::stream_text_async(
+            {.model = stream_model, .prompt = "Hello"}, [](const auto&) {}, std::move(complete));
+      }))
+    return 5;
 
   auto transport = cail::make_default_http_transport();
   std::string first_connection;
@@ -126,14 +171,8 @@ int main(int argc, char** argv) {
   std::cout << "blocking_4_ms "
             << std::chrono::duration_cast<milliseconds>(blocking_end - blocking_start).count()
             << '\n';
-  std::cout << "async_64_launch_ms "
-            << std::chrono::duration_cast<milliseconds>(launched - async_start).count() << '\n';
-  std::cout << "async_64_total_ms "
-            << std::chrono::duration_cast<milliseconds>(async_end - async_start).count() << '\n';
-  std::cout << "threads_before " << before.threads << " threads_in_flight " << in_flight.threads
-            << '\n';
-  std::cout << "resident_before_bytes " << before.resident_bytes << " resident_in_flight_bytes "
-            << in_flight.resident_bytes << '\n';
+  std::cout << "threads_before " << before.threads << " resident_before_bytes "
+            << before.resident_bytes << '\n';
   std::cout << "connection_reused " << connection_reused << '\n';
   return connection_reused ? 0 : 8;
 }

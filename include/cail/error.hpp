@@ -13,6 +13,7 @@ enum class ErrorCode {
   unsupported_schema,
   transport,
   cancelled,
+  backpressure,
   http_status,
   provider_response,
   refused,

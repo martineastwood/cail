@@ -35,8 +35,92 @@ int main() {
 ```
 
 The call blocks until the response finishes and returns a complete
-`GenerationResponse`. The callback runs synchronously as events arrive.
-Streaming lets you display output earlier; it does not move work to another thread.
+`GenerationResponse`. Each event handler finishes before the stream continues.
+Built-in HTTP providers invoke handlers on an I/O thread, so keep them brief and
+synchronize access to shared application state. Use `stream_text_async` to return
+to your caller while the stream runs. See [Tools](/guides/tools/) for an example
+and concurrency limits.
+
+## Schedule stream callbacks
+
+You can send stream events and completion to your application's event loop. This
+example keeps callback work on the main thread while the HTTP request runs:
+
+```cpp
+#include <cail/cail.hpp>
+
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <iostream>
+#include <mutex>
+
+int main() {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<std::function<void()>> tasks;
+    bool finished = false;
+
+    cail::AsyncOptions callbacks{
+        .schedule = [&](std::function<void()> task) {
+            {
+                std::lock_guard lock(mutex);
+                tasks.push_back(std::move(task));
+            }
+            ready.notify_one();
+        },
+        .max_pending_events = 256,
+    };
+    auto started = cail::stream_text_async(
+        {.model = cail::openai("gpt-6-luna"),
+         .prompt = "Explain RAII in one sentence.",
+         .tool_loop = {.async = callbacks}},
+        [](const cail::StreamEvent& event) {
+            if (const auto* text = std::get_if<cail::TextDelta>(&event))
+                std::cout << text->text << std::flush;
+        },
+        [&](cail::Result<cail::GenerationResponse> result) {
+            if (!result) std::cerr << result.error().message << '\n';
+            finished = true;
+        });
+    if (!started) {
+        std::cerr << started.error().message << '\n';
+        return 1;
+    }
+    while (!finished) {
+        std::unique_lock lock(mutex);
+        ready.wait(lock, [&] { return !tasks.empty(); });
+        auto task = std::move(tasks.front());
+        tasks.pop_front();
+        lock.unlock();
+        task();
+    }
+}
+```
+
+Set `OPENAI_API_KEY` before running the example. Keep the scheduler and any state
+captured by reference alive until completion. A scheduler must run every accepted
+task exactly once; if it cannot accept a task, it must throw before accepting it.
+If scheduling throws, CAIL reports an error on the thread attempting delivery.
+
+Events run serially, even if your scheduler uses multiple threads. Completion
+follows the queued events. With a scheduler, up to `max_pending_events` events
+can wait for delivery; the value must be positive. If the queue fills, CAIL
+cancels the stream, discards queued events, and completes with
+`ErrorCode::backpressure`. Increase the limit or consume events faster. This
+limit bounds callback delivery, not the size of the final response.
+
+Without a scheduler, handlers run on the provider's delivery thread. Returning
+from a handler permits further reads. Keep handlers brief to avoid holding up
+other requests. Native async streams do not use a blocking worker per stream.
+
+Cancellation discards queued events. An event already running can finish.
+Completion still runs through your scheduler, so keep its event loop running
+until completion arrives. Event handler exceptions end streaming with an error.
+
+Use the same callback options with agents via `ToolLoopOptions::async`, or pass
+`AsyncOptions` as the fifth argument to
+`model.stream_async(request, on_event, complete, stop, callbacks)`.
 
 ## Switch between generation and streaming
 

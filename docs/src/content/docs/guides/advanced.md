@@ -54,7 +54,9 @@ For a direct model call, pass the token as the second argument to
 
 ## Generate without blocking
 
-You can start generation and receive the result in a completion callback.
+For sequential async workflows, use `co_await` with the
+[coroutine interface](/guides/async/). For integrations that need callbacks,
+you can start generation and receive the result in a completion callback.
 `generate_text_async` accepts the same options as `generate_text`, including
 system prompts, messages, tools, middleware, and cancellation.
 
@@ -100,13 +102,22 @@ Built-in providers support async generation through OpenAI Responses, Chat
 Completions, Anthropic Messages, and Gemini. Azure Foundry and OpenCode use the
 same async APIs. For a custom model, check
 `model.adapter_capabilities().async_generation`. A custom HTTP transport must
-implement `send_async` for async requests.
+implement `send_async` for async requests and `stream_async` for async streaming.
 
 Requests own the model and input values until completion. Keep objects captured
 by reference in callbacks, middleware, or tools alive until completion. Callbacks
 can run before the initiating function returns, and may run on a CAIL I/O thread.
-Keep tool handlers and callbacks brief; schedule lengthy work on your application's
-executor. Callback exceptions must be handled by your application.
+Cancellation can deliver completion on the thread that calls `request_stop`.
+Keep callbacks brief and synchronize access to shared application state. Do not
+wait for another async completion inside a callback. Blocking HTTP requests
+inside an I/O callback return an `invalid_configuration` error; start an async
+request instead.
+
+Handle errors inside your completion callback. CAIL contains exceptions thrown
+by terminal completion callbacks and never calls them again. Exceptions from
+stream event handlers end the stream with an error. Synchronous tool handlers
+run separately from I/O callbacks. See [Tools](/guides/tools/) for concurrency
+limits and async tool handlers.
 
 Call `stop.request_stop()` to cancel. The token applies to active HTTP requests,
 retry delays, and later tool-loop steps. Tool handlers receive it through
@@ -119,6 +130,8 @@ remaining tools from starting after an active handler returns.
 | --- | --- | --- |
 | Text and tool loops | `generate_text_async(options, callback)` | `options.tool_loop.stop` |
 | Typed structured output | `generate_object_async<T>(options, callback)` | `options.tool_loop.stop` |
+| Text streams | `stream_text_async(options, on_event, callback)` | `options.tool_loop.stop` |
+| Agent streams | `agent.stream_async(input, on_event, callback, options)` | `options.stop` |
 | Agent prompts or requests | `agent.generate_async(input, callback, options)` | `options.stop` |
 | One embedding | `model.embed_async(text, callback, token)` | Third argument |
 | Embedding batch | `model.embed_many_async(texts, callback, token)` | Third argument |
@@ -130,11 +143,23 @@ Check `embedding_model.supports_async()` before async embedding calls with a
 custom model.
 
 Async agent text prompts and user messages load memory before starting the request and save successful
-turns before completion. Memory operations are synchronous. An explicit
+turns before completion. Memory loads and writes run asynchronously, including
+file storage. An explicit
 `GenerationRequest` bypasses memory, as with blocking agent calls.
 
-`stream_text` and `Agent::stream` still block the calling thread while delivering
-events. Use your application's executor when streaming must run off your UI thread.
+Use `stream_text_async` or `Agent::stream_async` to stream without blocking your
+caller. Built-in providers use native async streaming. Check
+`model.adapter_capabilities().async_streaming` for custom models.
+
+### Choose where callbacks run
+
+You can deliver callbacks through your application's scheduler with
+`ToolLoopOptions::async.schedule`. For model and embedding calls, pass
+`cail::AsyncOptions` after the stop token. Without a scheduler, callbacks run on
+the completing thread, possibly before the initiating call returns.
+
+See [Streaming](/guides/streaming/#schedule-stream-callbacks) for a complete
+example, event queue limits, and cancellation behavior.
 
 ## Timeouts and retries
 

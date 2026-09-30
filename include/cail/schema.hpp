@@ -40,7 +40,7 @@ struct Schema {
   std::optional<std::map<std::string, std::shared_ptr<Schema>>> properties;
   std::optional<std::vector<std::string>> required;
   std::shared_ptr<Schema> items;
-  std::optional<bool> additional_properties;
+  std::optional<glz::generic> additional_properties;
   std::optional<std::size_t> min_items;
   std::optional<std::size_t> max_items;
 };
@@ -334,13 +334,14 @@ namespace detail {
     result.items = std::make_shared<Schema>(std::move(*items));
   }
   if (source.contains("additionalProperties")) {
-    if (!source["additionalProperties"].is_boolean()) {
+    if (!source["additionalProperties"].is_boolean() &&
+        !source["additionalProperties"].is_object()) {
       return std::unexpected(Error{
           .code = ErrorCode::json_deserialization,
-          .message = "JSON Schema additionalProperties must be a boolean",
+          .message = "JSON Schema additionalProperties must be a boolean or an object",
       });
     }
-    result.additional_properties = source["additionalProperties"].get<bool>();
+    result.additional_properties = source["additionalProperties"];
   }
   if (source.contains("minItems")) {
     auto min_items = schema_size_from_generic(source["minItems"], "minItems");

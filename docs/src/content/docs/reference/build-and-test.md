@@ -43,6 +43,7 @@ Run `ctest --test-dir build/dev -N` to list the available suites.
 ./dev tidy          # clang-tidy over the test translation units.
 ./dev tidy --fix
 ./dev sanitizer     # Build and test with ASan and UBSan.
+./dev thread-sanitizer # Build and test for data races with ThreadSanitizer.
 ```
 
 Formatting is pinned to `clang-format` 23.1.1. `./dev format` warns when your

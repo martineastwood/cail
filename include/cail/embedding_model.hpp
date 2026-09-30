@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cail/error.hpp>
+#include <cail/task.hpp>
 
 #include <cstddef>
 #include <functional>
@@ -40,7 +41,7 @@ public:
                           EmbedManyAsyncFunction embed_many_async = {})
       : embed_many_(std::move(embed_many)), embed_many_async_(std::move(embed_many_async)) {}
 
-  [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(embed_many_); }
+  [[nodiscard]] explicit operator bool() const noexcept { return embed_many_ || embed_many_async_; }
   [[nodiscard]] bool supports_async() const noexcept {
     return static_cast<bool>(embed_many_async_);
   }
@@ -61,19 +62,22 @@ public:
   }
 
   [[nodiscard]] Result<void> embed_many_async(std::vector<std::string> inputs,
-                                              BatchCompletion complete,
-                                              std::stop_token stop = {}) const {
+                                              BatchCompletion complete, std::stop_token stop = {},
+                                              AsyncOptions options = {}) const {
     if (!embed_many_async_ || !complete)
       return std::unexpected(
           Error{.code = ErrorCode::invalid_configuration,
                 .message = "Async embeddings require a capable model and completion handler."});
     if (auto valid = validate_inputs(inputs, stop); !valid)
       return std::unexpected(valid.error());
-    return embed_many_async_(std::move(inputs), std::move(complete), stop);
+    return detail::initiate_async<EmbeddingBatch>(
+        detail::scheduled_completion<EmbeddingBatch>(std::move(complete), options),
+        [&](auto done) { return embed_many_async_(std::move(inputs), std::move(done), stop); });
   }
 
   [[nodiscard]] Result<void> embed_async(std::string input, EmbeddingCompletion complete,
-                                         std::stop_token stop = {}) const {
+                                         std::stop_token stop = {},
+                                         AsyncOptions options = {}) const {
     if (!complete)
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                    .message = "Async embeddings require a completion handler."});
@@ -81,6 +85,29 @@ public:
         {std::move(input)},
         [complete = std::move(complete)](Result<EmbeddingBatch> batch) {
           complete(single_embedding(std::move(batch)));
+        },
+        stop, std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<EmbeddingBatch>> embed_many_async(std::vector<std::string> inputs,
+                                                              std::stop_token stop = {},
+                                                              AsyncOptions options = {}) const {
+    return detail::await_result<EmbeddingBatch>(
+        [model = *this, inputs = std::move(inputs),
+         options = std::move(options)](auto complete, auto token, auto) mutable {
+          return model.embed_many_async(std::move(inputs), std::move(complete), token,
+                                        std::move(options));
+        },
+        stop);
+  }
+
+  [[nodiscard]] Task<Result<Embedding>> embed_async(std::string input, std::stop_token stop = {},
+                                                    AsyncOptions options = {}) const {
+    return detail::await_result<Embedding>(
+        [model = *this, input = std::move(input),
+         options = std::move(options)](auto complete, auto token, auto) mutable {
+          return model.embed_async(std::move(input), std::move(complete), token,
+                                   std::move(options));
         },
         stop);
   }

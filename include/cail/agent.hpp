@@ -94,24 +94,205 @@ public:
   [[nodiscard]] Result<void> generate_async(Message message,
                                             LanguageModel::GenerationCompletion complete,
                                             ToolLoopOptions options = {}) const {
-    if (!complete)
+    return message_async(std::move(message), {}, std::move(complete), std::move(options));
+  }
+
+  [[nodiscard]] Result<void> stream_async(std::string_view prompt, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          ToolLoopOptions options = {}) const {
+    return stream_async(Message{.content = {TextPart{.text = std::string{prompt}}}},
+                        std::move(on_event), std::move(complete), std::move(options));
+  }
+
+  [[nodiscard]] Result<void> stream_async(Message message, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          ToolLoopOptions options = {}) const {
+    if (!on_event)
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
-                                   .message = "Async agents require a completion handler."});
-    auto messages = message_history(std::move(message), options);
-    if (!messages)
-      return std::unexpected(messages.error());
-    const auto id = options.conversation_id.empty() ? conversation_id_ : options.conversation_id;
-    auto prompt_message = messages->back();
-    return generate_async(
-        GenerationRequest{.messages = std::move(*messages)},
-        [memory = memory_, id, prompt_message = std::move(prompt_message),
-         complete = std::move(complete)](Result<GenerationResponse> response) {
-          complete(store_response(memory, id, prompt_message, std::move(response)));
-        },
-        std::move(options));
+                                   .message = "Async streaming requires an event handler."});
+    return message_async(std::move(message), std::move(on_event), std::move(complete),
+                         std::move(options));
+  }
+
+  [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          ToolLoopOptions options = {}) const {
+    return stream_tool_loop_async(model_, prepare(std::move(request)), tools_, std::move(on_event),
+                                  std::move(complete), std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  generate_async(std::string_view prompt, ToolLoopOptions options = {}) const {
+    return generate_async(Message{.content = {TextPart{.text = std::string{prompt}}}},
+                          std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  generate_async(Message message, ToolLoopOptions options = {}) const {
+    return await_turn(std::move(message), {}, std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  generate_async(GenerationRequest request, ToolLoopOptions options = {}) const {
+    return await_turn(std::move(request), {}, std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>> stream_async(std::string_view prompt,
+                                                              StreamHandler on_event,
+                                                              ToolLoopOptions options = {}) const {
+    return stream_async(Message{.content = {TextPart{.text = std::string{prompt}}}},
+                        std::move(on_event), std::move(options));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  stream_async(Message message, StreamHandler on_event, ToolLoopOptions options = {}) const {
+    return await_turn(std::move(message), std::move(on_event), std::move(options), true);
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>> stream_async(GenerationRequest request,
+                                                              StreamHandler on_event,
+                                                              ToolLoopOptions options = {}) const {
+    return await_turn(std::move(request), std::move(on_event), std::move(options), true);
   }
 
 private:
+  template <typename Input>
+  Task<Result<GenerationResponse>> await_turn(Input input, StreamHandler on_event,
+                                              ToolLoopOptions options,
+                                              bool streaming = false) const {
+    const auto stop = options.stop;
+    return detail::await_result<GenerationResponse>(
+        [agent = *this, input = std::move(input), on_event = std::move(on_event),
+         options = std::move(options),
+         streaming](auto complete, auto token, auto callbacks) mutable {
+          options.stop = token;
+          if (streaming) {
+            if (!options.async.schedule)
+              options.async.schedule = std::move(callbacks.schedule);
+            return agent.stream_async(std::move(input), std::move(on_event), std::move(complete),
+                                      std::move(options));
+          }
+          return agent.generate_async(std::move(input), std::move(complete), std::move(options));
+        },
+        stop);
+  }
+
+  struct AsyncTurn : std::enable_shared_from_this<AsyncTurn> {
+    std::shared_ptr<Agent> agent;
+    std::shared_ptr<void> turn;
+    Message prompt;
+    std::string id;
+    ToolLoopOptions options;
+    StreamHandler on_event;
+    LanguageModel::GenerationCompletion complete;
+
+    void finish(Result<GenerationResponse> result) {
+      turn.reset();
+      complete(std::move(result));
+    }
+
+    void store(Result<GenerationResponse> result) {
+      if (!result || !agent->memory_ || id.empty()) {
+        finish(std::move(result));
+        return;
+      }
+      if (options.stop.stop_requested()) {
+        finish(std::unexpected(generation_cancelled_error()));
+        return;
+      }
+      std::vector<Message> messages{prompt};
+      messages.insert(messages.end(), result->turn.begin(), result->turn.end());
+      auto self = shared_from_this();
+      auto started = detail::initiate_async<void>(
+          [self, result = std::move(result)](Result<void> stored) mutable {
+            self->finish(stored ? std::move(result)
+                                : Result<GenerationResponse>{std::unexpected(stored.error())});
+          },
+          [&](auto done) {
+            return agent->memory_->append_async(id, std::move(messages), std::move(done),
+                                                options.stop);
+          });
+      if (!started)
+        finish(std::unexpected(started.error()));
+    }
+
+    Result<void> generate(std::vector<Message> history) {
+      if (options.stop.stop_requested())
+        return std::unexpected(generation_cancelled_error());
+      if (options.keep_last_messages)
+        trim_messages(history, options.keep_last_messages);
+      history.push_back(prompt);
+      auto completion = [self = shared_from_this()](Result<GenerationResponse> result) {
+        self->store(std::move(result));
+      };
+      auto request = agent->prepare(GenerationRequest{.messages = std::move(history)});
+      if (on_event)
+        return stream_tool_loop_async(agent->model_, std::move(request), agent->tools_, on_event,
+                                      std::move(completion), options);
+      return run_tool_loop_async(agent->model_, std::move(request), agent->tools_,
+                                 std::move(completion), options);
+    }
+  };
+
+  [[nodiscard]] Result<void> message_async(Message message, StreamHandler on_event,
+                                           LanguageModel::GenerationCompletion complete,
+                                           ToolLoopOptions options) const {
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async agents require a completion handler."});
+    if (message.role != MessageRole::user || !message.tool_call_id.empty() ||
+        !message.tool_calls.empty() || message.content.empty())
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Agent memory input requires a nonempty user message "
+                                              "without tool calls or a tool call ID."});
+    auto acquired = acquire_turn(options);
+    if (!acquired)
+      return std::unexpected(acquired.error());
+    auto state = std::make_shared<AsyncTurn>();
+    state->agent = std::make_shared<Agent>(*this);
+    state->turn = std::move(*acquired);
+    state->prompt = std::move(message);
+    state->id = options.conversation_id.empty() ? conversation_id_ : options.conversation_id;
+    if (on_event) {
+      if (!options.async.max_pending_events)
+        return std::unexpected(
+            detail::async_callback_error("max_pending_events must be positive."));
+      auto delivery = std::make_shared<detail::StreamDelivery>(
+          std::move(on_event), std::move(complete), options.async, options.stop);
+      state->on_event = [delivery](const StreamEvent& event) { delivery->event(event); };
+      state->complete = [delivery](Result<GenerationResponse> result) {
+        delivery->finish(std::move(result));
+      };
+      options.stop = delivery->token();
+    } else {
+      state->complete =
+          detail::scheduled_completion<GenerationResponse>(std::move(complete), options.async);
+    }
+    options.async = {};
+    state->options = std::move(options);
+    if (!memory_ || state->id.empty())
+      return state->generate({});
+    return detail::initiate_async<std::vector<Message>>(
+        [state](Result<std::vector<Message>> history) {
+          if (!history)
+            state->finish(std::unexpected(history.error()));
+          else if (auto started = state->generate(std::move(*history)); !started)
+            state->finish(std::unexpected(started.error()));
+        },
+        [&](auto done) {
+          return memory_->load_async(state->id, std::move(done), state->options.stop);
+        });
+  }
+
+  [[nodiscard]] Result<std::shared_ptr<void>> acquire_turn(const ToolLoopOptions& options) const {
+    if (options.stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    const auto& id = options.conversation_id.empty() ? conversation_id_ : options.conversation_id;
+    if (memory_ && !id.empty())
+      return memory_->acquire_turn(id);
+    return std::shared_ptr<void>{};
+  }
+
   [[nodiscard]] Result<std::vector<Message>> message_history(Message message,
                                                              const ToolLoopOptions& options) const {
     if (options.stop.stop_requested())
@@ -125,7 +306,7 @@ private:
     const auto& id = options.conversation_id.empty() ? conversation_id_ : options.conversation_id;
     std::vector<Message> messages;
     if (memory_ && !id.empty()) {
-      auto history = memory_->load(id);
+      auto history = detail::memory_operation([&] { return memory_->load(id); });
       if (!history)
         return std::unexpected(history.error());
       if (options.keep_last_messages)
@@ -142,7 +323,9 @@ private:
     if (response && memory && !id.empty()) {
       std::vector<Message> stored{prompt};
       stored.insert(stored.end(), response->turn.begin(), response->turn.end());
-      if (auto appended = memory->append(id, std::move(stored)); !appended)
+      if (auto appended =
+              detail::memory_operation([&] { return memory->append(id, std::move(stored)); });
+          !appended)
         return std::unexpected(appended.error());
     }
     return response;
@@ -151,6 +334,9 @@ private:
   template <typename Send>
   [[nodiscard]] Result<GenerationResponse>
   message_with_memory(Message message, ToolLoopOptions options, Send&& send) const {
+    auto turn = acquire_turn(options);
+    if (!turn)
+      return std::unexpected(turn.error());
     auto messages = message_history(std::move(message), options);
     if (!messages)
       return std::unexpected(messages.error());

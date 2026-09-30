@@ -102,7 +102,8 @@ see [Files, images, and PDFs](/guides/loaders/) for supported formats.
 ### Stream or run asynchronously
 
 The same user message works with `agent.stream(message, callback, options)` and
-`agent.generate_async(message, callback, options)`:
+`agent.generate_async(message, callback, options)`. Use
+`agent.stream_async(message, on_event, complete, options)` for async streaming:
 
 ```cpp
 cail::Message message{
@@ -121,8 +122,18 @@ if (!started) {
 
 This follow-up reuses the report and chart already in memory. Keep your application
 running until the callback finishes. Successful turns are saved before completion;
-failed or cancelled calls store no new attachments. Conversation overrides,
+generation failures store no new attachments. Async calls load history and
+save successful turns without blocking your caller. Cancellation stops queued
+memory work, but a write already running may finish. Callback delivery errors
+do not roll back a saved turn. Conversation overrides,
 `keep_last_messages`, tools, and cancellation work the same way as for text prompts.
+
+For a remote store, you can override `load_async`, `append_async`, and
+`clear_async` on `ConversationMemory`. Each returns `Result<void>` to report
+whether it started, takes a completion callback and stop token, and completes
+once after successful initiation. Async operations must own their inputs until
+completion and permit concurrent calls. If you implement only the synchronous
+methods, CAIL runs them on bounded workers. Use shared ownership for async stores.
 
 ## Pick a backend
 
@@ -260,6 +271,18 @@ history.insert(history.end(), response->turn.begin(), response->turn.end());
   of the conversation. Call `clear` when you want to start over.
 - Compaction such as LLM-generated rolling summaries is not built in yet. You
   can implement it in a `ConversationMemory` wrapper of your own.
+
+## Use memory with concurrent requests
+
+Share one memory instance between agents that use the same conversation.
+A memory-backed turn rejects a second turn for the same conversation with a
+`memory` error until the first finishes. Wait for the generation completion
+callback before sending the next message. Different conversation IDs can run
+concurrently.
+
+The built-in memory stores support concurrent loads, appends, and clears in one
+process. File memory does not coordinate writes from separate processes. If you
+supply your own memory store, make its operations safe for concurrent calls.
 
 ## Next steps
 

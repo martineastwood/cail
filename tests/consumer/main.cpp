@@ -8,6 +8,14 @@ struct Response {
   std::optional<std::string> explanation;
 };
 
+cail::Task<cail::Result<cail::GenerationResponse>> coroutine_smoke() {
+  cail::LanguageModel model({}, {}, {}, [](auto, auto complete, auto) -> cail::Result<void> {
+    complete(cail::GenerationResponse{.text = "installed"});
+    return {};
+  });
+  co_return co_await cail::generate_text_async({.model = model, .prompt = "hello"});
+}
+
 int main() {
   Response response{.confidence = {.value = 0.8}, .explanation = "clear"};
   const auto json = cail::to_json(response);
@@ -21,7 +29,9 @@ int main() {
   const auto mistral = cail::mistral("mistral-vibe-cli-with-tools");
   const auto hyper = cail::hyper("deepseek-v4-flash");
   const auto ollama_cloud = cail::ollama_cloud("gemma4:31b");
-  return decoded && decoded->confidence.value == 0.8 && decoded->explanation == "clear" &&
+  const auto awaited = cail::run(coroutine_smoke());
+  return awaited && awaited->text == "installed" && decoded && decoded->confidence.value == 0.8 &&
+                 decoded->explanation == "clear" &&
                  model.adapter_capabilities().structured_output &&
                  anthropic.adapter_capabilities().tools &&
                  gemini.adapter_capabilities().streaming && mistral.adapter_capabilities().tools &&

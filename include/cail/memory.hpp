@@ -1,14 +1,18 @@
 #pragma once
 
+#include <cail/async.hpp>
 #include <cail/detail/base64.hpp>
 #include <cail/error.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -61,11 +65,24 @@ inline std::string sanitize_conversation_id(const std::string& conversation_id) 
   return name.empty() ? std::string{"_"} : name;
 }
 
+template <typename Operation> auto memory_operation(Operation operation) -> decltype(operation()) {
+  try {
+    return operation();
+  } catch (const std::exception& error) {
+    return std::unexpected(
+        Error{.code = ErrorCode::memory,
+              .message = std::string{"Conversation memory failed: "} + error.what()});
+  } catch (...) {
+    return std::unexpected(
+        Error{.code = ErrorCode::memory, .message = "Conversation memory failed."});
+  }
+}
+
 } // namespace detail
 
 // Storage for agent conversation history. Implement this over your own store
-// for durable sessions.
-class ConversationMemory {
+// for durable sessions. Operations must support concurrent calls.
+class ConversationMemory : public std::enable_shared_from_this<ConversationMemory> {
 public:
   virtual ~ConversationMemory() = default;
 
@@ -75,12 +92,91 @@ public:
                                             std::vector<Message> messages) = 0;
 
   [[nodiscard]] virtual Result<void> clear(const std::string& conversation_id) = 0;
+
+  using LoadCompletion = std::function<void(Result<std::vector<Message>>)>;
+  using Completion = std::function<void(Result<void>)>;
+
+  // Blocking stores use bounded workers. Remote stores can override these methods.
+  [[nodiscard]] virtual Result<void> load_async(std::string id, LoadCompletion complete,
+                                                std::stop_token stop = {}) {
+    return post_memory<std::vector<Message>>(
+        std::move(complete), stop,
+        [id = std::move(id)](ConversationMemory& memory) { return memory.load(id); });
+  }
+
+  [[nodiscard]] virtual Result<void> append_async(std::string id, std::vector<Message> messages,
+                                                  Completion complete, std::stop_token stop = {}) {
+    return post_memory<void>(
+        std::move(complete), stop,
+        [id = std::move(id), messages = std::move(messages)](ConversationMemory& memory) mutable {
+          return memory.append(id, std::move(messages));
+        });
+  }
+
+  [[nodiscard]] virtual Result<void> clear_async(std::string id, Completion complete,
+                                                 std::stop_token stop = {}) {
+    return post_memory<void>(
+        std::move(complete), stop,
+        [id = std::move(id)](ConversationMemory& memory) { return memory.clear(id); });
+  }
+
+private:
+  template <typename T, typename Callback, typename Work>
+  Result<void> post_memory(Callback complete, std::stop_token stop, Work work) {
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async memory requires a completion handler."});
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto owner = weak_from_this().lock();
+    if (!owner)
+      return std::unexpected(
+          Error{.code = ErrorCode::memory, .message = "Async memory requires shared ownership."});
+    return detail::memory_workers().post(
+        [owner, work = std::move(work), stop, done = detail::complete_once<T>(std::move(complete))](
+            std::stop_token worker_stop) mutable {
+          detail::LinkedStop linked(stop, worker_stop);
+          if (linked.source.stop_requested())
+            done(std::unexpected(generation_cancelled_error()));
+          else {
+            auto result = detail::memory_operation([&] { return work(*owner); });
+            done(linked.source.stop_requested()
+                     ? Result<T>{std::unexpected(generation_cancelled_error())}
+                     : std::move(result));
+          }
+        },
+        stop);
+  }
+
+  friend class Agent;
+
+  // A complete turn must use one history snapshot. Overlapping turns for the
+  // same conversation are rejected instead of silently reordering history.
+  [[nodiscard]] Result<std::shared_ptr<void>> acquire_turn(const std::string& id) {
+    auto owner = weak_from_this().lock();
+    if (!owner)
+      return std::unexpected(
+          Error{.code = ErrorCode::memory,
+                .message = "Conversation turns require shared memory ownership."});
+    std::lock_guard lock(turn_mutex_);
+    if (!active_turns_.insert(id).second)
+      return std::unexpected(Error{.code = ErrorCode::memory,
+                                   .message = "A turn is already active for conversation: " + id});
+    return std::shared_ptr<void>(this, [owner = std::move(owner), id](void*) {
+      std::lock_guard lock(owner->turn_mutex_);
+      owner->active_turns_.erase(id);
+    });
+  }
+
+  std::mutex turn_mutex_;
+  std::unordered_set<std::string> active_turns_;
 };
 
 // Conversation history in process memory. Forgets everything on restart.
 class InMemoryConversationMemory final : public ConversationMemory {
 public:
   [[nodiscard]] Result<std::vector<Message>> load(const std::string& conversation_id) override {
+    std::lock_guard lock(mutex_);
     if (const auto found = conversations_.find(conversation_id); found != conversations_.end()) {
       return found->second;
     }
@@ -88,6 +184,7 @@ public:
   }
 
   Result<void> append(const std::string& conversation_id, std::vector<Message> messages) override {
+    std::lock_guard lock(mutex_);
     auto& conversation = conversations_[conversation_id];
     conversation.insert(conversation.end(), std::make_move_iterator(messages.begin()),
                         std::make_move_iterator(messages.end()));
@@ -95,11 +192,13 @@ public:
   }
 
   Result<void> clear(const std::string& conversation_id) override {
+    std::lock_guard lock(mutex_);
     conversations_.erase(conversation_id);
     return {};
   }
 
 private:
+  std::mutex mutex_;
   std::unordered_map<std::string, std::vector<Message>> conversations_;
 };
 
@@ -115,6 +214,7 @@ public:
       : directory_(std::move(directory)) {}
 
   [[nodiscard]] Result<std::vector<Message>> load(const std::string& conversation_id) override {
+    std::lock_guard lock(mutex_);
     auto stored = read_file(path(conversation_id));
     if (!stored) {
       return std::unexpected(stored.error());
@@ -156,6 +256,7 @@ public:
   }
 
   Result<void> append(const std::string& conversation_id, std::vector<Message> messages) override {
+    std::lock_guard lock(mutex_);
     auto conversation = load(conversation_id);
     if (!conversation) {
       return std::unexpected(conversation.error());
@@ -167,6 +268,7 @@ public:
   }
 
   Result<void> clear(const std::string& conversation_id) override {
+    std::lock_guard lock(mutex_);
     std::error_code error;
     std::filesystem::remove(path(conversation_id), error);
     if (error) {
@@ -233,6 +335,9 @@ private:
     return {};
   }
 
+  // File instances in this process share a lock, including read-modify-write
+  // and the temporary file used by atomic replacement.
+  inline static std::recursive_mutex mutex_;
   std::filesystem::path directory_{};
 };
 

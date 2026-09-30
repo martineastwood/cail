@@ -73,7 +73,146 @@ public:
                                                std::move(complete), stop, decode_http_response);
   }
 
+  [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          std::stop_token stop = {}) const {
+    if (!on_event || !complete)
+      return std::unexpected(
+          Error{.code = ErrorCode::invalid_configuration,
+                .message = "Async streaming requires event and completion handlers."});
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto http = make_http_request(request, true);
+    if (!http)
+      return std::unexpected(http.error());
+    auto state = std::make_shared<StreamState>();
+    state->on_event = std::move(on_event);
+    state->stop = stop;
+    return cail::detail::stream_generation_async(
+        *transport_, std::move(request), std::move(*http),
+        [state](std::string_view bytes) { state->feed(bytes); }, std::move(complete), stop,
+        [state](const HttpResponse& response) { return state->finish(response); });
+  }
+
 private:
+  struct StreamState {
+    StreamHandler on_event;
+    std::stop_token stop;
+    cail::detail::SseParser sse_parser;
+    std::optional<wire::ResponseBody> streamed_response;
+    std::optional<Error> stream_error;
+    std::string reasoning;
+    void handle_event(const cail::detail::ServerSentEvent& event) {
+      if (stop.stop_requested() || stream_error || event.data.empty() || event.data == "[DONE]") {
+        return;
+      }
+      wire::StreamEventBody stream_event{};
+      if (const auto error =
+              glz::read<glz::opts{.error_on_unknown_keys = false}>(stream_event, event.data);
+          error) {
+        stream_error = Error{
+            .code = ErrorCode::provider_response,
+            .message = glz::format_error(error, event.data),
+            .byte_offset = error.count,
+        };
+        return;
+      }
+      if (stream_event.type.empty()) {
+        stream_event.type = event.event;
+      }
+      if (stream_event.type == "response.output_text.delta" && stream_event.delta) {
+        on_event(StreamEvent{TextDelta{.text = *stream_event.delta}});
+      } else if (stream_event.type == "response.refusal.delta" && stream_event.delta) {
+        on_event(StreamEvent{RefusalDelta{.text = *stream_event.delta}});
+      } else if ((stream_event.type == "response.reasoning_text.delta" ||
+                  stream_event.type == "response.reasoning_summary_text.delta") &&
+                 stream_event.delta) {
+        reasoning += *stream_event.delta;
+        on_event(StreamEvent{ReasoningDelta{.text = *stream_event.delta}});
+      } else if (stream_event.type == "response.function_call_arguments.delta" &&
+                 stream_event.delta) {
+        if (stream_event.output_index) {
+          on_event(StreamEvent{ToolCallArgumentsDelta{
+              .output_index = *stream_event.output_index,
+              .arguments = *stream_event.delta,
+          }});
+        }
+      } else if (stream_event.type == "response.completed" ||
+                 stream_event.type == "response.incomplete" ||
+                 stream_event.type == "response.failed") {
+        streamed_response = std::move(stream_event.response);
+      } else if (stream_event.type == "error") {
+        stream_error = Error{
+            .code = ErrorCode::provider_response,
+            .message = stream_event.message.value_or(stream_event.error
+                                                         ? stream_event.error->message
+                                                         : "OpenAI returned a streaming error."),
+            .provider_code =
+                stream_event.error && stream_event.error->code ? *stream_event.error->code : "",
+            .provider_type =
+                stream_event.error && stream_event.error->type ? *stream_event.error->type : "",
+        };
+      }
+    }
+    void feed(std::string_view bytes) {
+      sse_parser.feed(bytes, [this](const auto& event) { handle_event(event); });
+    }
+    Result<GenerationResponse> finish(const HttpResponse& response) {
+      const auto with_context = [&](Error error) {
+        return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+      };
+      if (stop.stop_requested()) {
+        return with_context(generation_cancelled_error());
+      }
+      if (is_http_error_status(response.status_code)) {
+        auto error = http_status_error_from_json_body(response);
+        error.message = "OpenAI returned HTTP " + std::to_string(response.status_code) +
+                        (error.message.empty() ? "." : ": " + error.message);
+        return with_context(std::move(error));
+      }
+
+      sse_parser.finish([this](const auto& event) { handle_event(event); });
+      if (stream_error) {
+        return with_context(std::move(*stream_error));
+      }
+      if (!streamed_response) {
+        return with_context(Error{
+            .code = ErrorCode::provider_response,
+            .message = "OpenAI closed the event stream without a completed response.",
+            .http_status = response.status_code,
+        });
+      }
+      std::vector<std::size_t> call_indexes;
+      for (std::size_t index = 0; index < streamed_response->output.size(); ++index) {
+        auto item =
+            wire::decode_response_item(streamed_response->output[index], response.status_code);
+        if (!item) {
+          return with_context(item.error());
+        }
+        if (item->type == "function_call") {
+          call_indexes.push_back(index);
+        }
+      }
+      auto result = wire::decode_response(std::move(*streamed_response), response.status_code);
+      if (!result) {
+        return with_context(result.error());
+      }
+      if (result->reasoning.empty()) {
+        result->reasoning = std::move(reasoning);
+      }
+      for (std::size_t index = 0; index < result->tool_calls.size(); ++index) {
+        on_event(StreamEvent{ToolCallReady{
+            .output_index = call_indexes[index],
+            .call = result->tool_calls[index],
+        }});
+      }
+      if (result->usage) {
+        on_event(StreamEvent{UsageUpdate{.usage = *result->usage}});
+      }
+      return result;
+    }
+  };
+
   [[nodiscard]] static Result<GenerationResponse>
   decode_http_response(const HttpResponse& response) {
     const auto context = [&](Error error) {
@@ -421,131 +560,20 @@ private:
     if (!prepared)
       return std::unexpected(prepared.error());
     auto http_request = std::move(*prepared);
-    cail::detail::SseParser sse_parser;
-    std::optional<wire::ResponseBody> streamed_response;
-    std::optional<Error> stream_error;
-    std::string reasoning;
-    const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
-      if (stop.stop_requested() || stream_error || event.data.empty() || event.data == "[DONE]") {
-        return;
-      }
-      wire::StreamEventBody stream_event{};
-      if (const auto error =
-              glz::read<glz::opts{.error_on_unknown_keys = false}>(stream_event, event.data);
-          error) {
-        stream_error = Error{
-            .code = ErrorCode::provider_response,
-            .message = glz::format_error(error, event.data),
-            .byte_offset = error.count,
-        };
-        return;
-      }
-      if (stream_event.type.empty()) {
-        stream_event.type = event.event;
-      }
-      if (stream_event.type == "response.output_text.delta" && stream_event.delta) {
-        on_event(StreamEvent{TextDelta{.text = *stream_event.delta}});
-      } else if (stream_event.type == "response.refusal.delta" && stream_event.delta) {
-        on_event(StreamEvent{RefusalDelta{.text = *stream_event.delta}});
-      } else if ((stream_event.type == "response.reasoning_text.delta" ||
-                  stream_event.type == "response.reasoning_summary_text.delta") &&
-                 stream_event.delta) {
-        reasoning += *stream_event.delta;
-        on_event(StreamEvent{ReasoningDelta{.text = *stream_event.delta}});
-      } else if (stream_event.type == "response.function_call_arguments.delta" &&
-                 stream_event.delta) {
-        if (stream_event.output_index) {
-          on_event(StreamEvent{ToolCallArgumentsDelta{
-              .output_index = *stream_event.output_index,
-              .arguments = *stream_event.delta,
-          }});
-        }
-      } else if (stream_event.type == "response.completed" ||
-                 stream_event.type == "response.incomplete" ||
-                 stream_event.type == "response.failed") {
-        streamed_response = std::move(stream_event.response);
-      } else if (stream_event.type == "error") {
-        stream_error = Error{
-            .code = ErrorCode::provider_response,
-            .message = stream_event.message.value_or(stream_event.error
-                                                         ? stream_event.error->message
-                                                         : "OpenAI returned a streaming error."),
-            .provider_code =
-                stream_event.error && stream_event.error->code ? *stream_event.error->code : "",
-            .provider_type =
-                stream_event.error && stream_event.error->type ? *stream_event.error->type : "",
-        };
-      }
-    };
-
-    auto http_response =
-        streaming ? transport_->stream(
-                        http_request,
-                        [&](std::string_view bytes) { sse_parser.feed(bytes, handle_event); }, stop)
-                  : transport_->send(http_request, stop);
-    if (!http_response) {
-      return std::unexpected(http_response.error());
-    }
-    if (auto middleware = cail::detail::run_after_response(request, *http_response); !middleware) {
+    StreamState state;
+    state.on_event = on_event;
+    state.stop = stop;
+    auto response =
+        on_event ? transport_->stream(
+                       http_request, [&state](std::string_view bytes) { state.feed(bytes); }, stop)
+                 : transport_->send(http_request, stop);
+    if (!response)
+      return std::unexpected(response.error());
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware)
       return std::unexpected(middleware.error());
-    }
-    const auto with_context = [&](Error error) {
-      return unexpected_with_http_context<GenerationResponse>(std::move(error), *http_response);
-    };
-    if (stop.stop_requested()) {
-      return with_context(generation_cancelled_error());
-    }
-    if (is_http_error_status(http_response->status_code)) {
-      auto error = http_status_error_from_json_body(*http_response);
-      error.message = "OpenAI returned HTTP " + std::to_string(http_response->status_code) +
-                      (error.message.empty() ? "." : ": " + error.message);
-      return with_context(std::move(error));
-    }
-
-    if (streaming) {
-      sse_parser.finish(handle_event);
-      if (stream_error) {
-        return with_context(std::move(*stream_error));
-      }
-      if (!streamed_response) {
-        return with_context(Error{
-            .code = ErrorCode::provider_response,
-            .message = "OpenAI closed the event stream without a completed response.",
-            .http_status = http_response->status_code,
-        });
-      }
-      std::vector<std::size_t> call_indexes;
-      for (std::size_t index = 0; index < streamed_response->output.size(); ++index) {
-        auto item = wire::decode_response_item(streamed_response->output[index],
-                                               http_response->status_code);
-        if (!item) {
-          return with_context(item.error());
-        }
-        if (item->type == "function_call") {
-          call_indexes.push_back(index);
-        }
-      }
-      auto result =
-          wire::decode_response(std::move(*streamed_response), http_response->status_code);
-      if (!result) {
-        return with_context(result.error());
-      }
-      if (result->reasoning.empty()) {
-        result->reasoning = std::move(reasoning);
-      }
-      for (std::size_t index = 0; index < result->tool_calls.size(); ++index) {
-        on_event(StreamEvent{ToolCallReady{
-            .output_index = call_indexes[index],
-            .call = result->tool_calls[index],
-        }});
-      }
-      if (result->usage) {
-        on_event(StreamEvent{UsageUpdate{.usage = *result->usage}});
-      }
-      return result;
-    }
-
-    return decode_http_response(*http_response);
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    return on_event ? state.finish(*response) : decode_http_response(*response);
   }
 
 public:
@@ -592,6 +620,15 @@ language_model_from(const std::shared_ptr<openai::Client>& client) {
                std::stop_token stop) {
         return client->generate_async(
             std::move(request),
+            [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+              complete(std::move(result));
+            },
+            stop);
+      },
+      [client](GenerationRequest request, StreamHandler handler,
+               LanguageModel::GenerationCompletion complete, std::stop_token stop) {
+        return client->stream_async(
+            std::move(request), std::move(handler),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {
               complete(std::move(result));
             },

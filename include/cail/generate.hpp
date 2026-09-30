@@ -101,6 +101,42 @@ generate_text_async(GenerateTextOptions options, LanguageModel::GenerationComple
                              std::move(options.tool_loop));
 }
 
+[[nodiscard]] inline Result<void> stream_text_async(GenerateTextOptions options,
+                                                    StreamHandler on_event,
+                                                    LanguageModel::GenerationCompletion complete) {
+  auto request = detail::prepare_generation_request(options);
+  if (!request)
+    return std::unexpected(request.error());
+  return stream_tool_loop_async(std::move(options.model), std::move(*request),
+                                std::move(options.tools), std::move(on_event), std::move(complete),
+                                std::move(options.tool_loop));
+}
+
+[[nodiscard]] inline Task<Result<GenerationResponse>>
+generate_text_async(GenerateTextOptions options) {
+  const auto stop = options.tool_loop.stop;
+  return detail::await_result<GenerationResponse>(
+      [options = std::move(options)](auto complete, auto token, auto) mutable {
+        options.tool_loop.stop = token;
+        return generate_text_async(std::move(options), std::move(complete));
+      },
+      stop);
+}
+
+[[nodiscard]] inline Task<Result<GenerationResponse>> stream_text_async(GenerateTextOptions options,
+                                                                        StreamHandler on_event) {
+  const auto stop = options.tool_loop.stop;
+  return detail::await_result<GenerationResponse>(
+      [options = std::move(options), on_event = std::move(on_event)](auto complete, auto token,
+                                                                     auto callbacks) mutable {
+        options.tool_loop.stop = token;
+        if (!options.tool_loop.async.schedule)
+          options.tool_loop.async.schedule = std::move(callbacks.schedule);
+        return stream_text_async(std::move(options), std::move(on_event), std::move(complete));
+      },
+      stop);
+}
+
 namespace detail {
 
 template <typename T>
@@ -148,6 +184,17 @@ template <typename T>
                              [complete = std::move(complete)](Result<GenerationResponse> response) {
                                complete(detail::decode_generated_object<T>(std::move(response)));
                              });
+}
+
+template <typename T>
+[[nodiscard]] Task<Result<T>> generate_object_async(GenerateTextOptions options) {
+  const auto stop = options.tool_loop.stop;
+  return detail::await_result<T>(
+      [options = std::move(options)](auto complete, auto token, auto) mutable {
+        options.tool_loop.stop = token;
+        return generate_object_async<T>(std::move(options), std::move(complete));
+      },
+      stop);
 }
 
 } // namespace cail

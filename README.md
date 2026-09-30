@@ -308,7 +308,7 @@ if (!first) {
 auto follow_up = weather_agent.generate("What is the main conclusion?");
 ```
 
-`generate`, `stream`, and `generate_async` accept user messages through the same
+`generate`, `stream`, `generate_async`, and `stream_async` accept user messages through the same
 memory path. File memory preserves attachment bytes across restarts. Existing
 version 1 conversation files must be cleared before reuse with the new version 2
 format. See [Memory](docs/src/content/docs/guides/memory.md) for supported inputs,
@@ -752,25 +752,37 @@ availability.
 
 ## Control execution
 
-`generate()`, `stream()`, embeddings, and tool loops block the calling thread until they
-finish. You can schedule these calls on your application's executor and share a provider
-model across concurrent tasks.
-
-For example, you can move a request off the current thread with `std::async`:
+You can await generation, streams, and embeddings with C++ coroutines:
 
 ```cpp
-auto model = cail::openai("gpt-6-luna");
-auto pending = std::async(std::launch::async, [&] {
-    return cail::generate_text({.model = model, .prompt = "Summarize this document."});
-});
+#include <cail/cail.hpp>
+#include <iostream>
 
-do_other_work();
-auto response = pending.get();
+cail::Task<int> chat() {
+    cail::Agent agent({.model = cail::openai("gpt-6-luna")});
+    auto response = co_await agent.generate_async("Summarize RAII in one sentence.");
+    if (!response) {
+        std::cerr << response.error().message << '\n';
+        co_return 1;
+    }
+    std::cout << response->text << '\n';
+    co_return 0;
+}
+
+int main() { return cail::run(chat()); }
 ```
 
-The default HTTP transport supports concurrent calls. A custom transport must also support
-calls from multiple threads. Pass a `std::stop_token` to `model.generate(request, token)`
-to cancel a nonstreaming request.
+Omit the completion callback to await `generate_text_async`,
+`generate_object_async<T>`, agent calls, or embeddings. For streaming, use
+`co_await agent.stream_async(prompt, on_event)` to receive events and then the
+final result. `cail::run` runs a workflow from `main`; existing Asio applications
+can await these calls on their own executor. See the
+[async guide](docs/src/content/docs/guides/async.md) for a complete quickstart,
+cancellation, and task ownership.
+
+Synchronous generation, streaming, embeddings, and tool loops still block the
+caller. The default HTTP transport supports concurrent calls. Custom transports
+must support calls from multiple threads.
 
 All built-in provider families support nonblocking generation. Use
 `generate_text_async(options, callback)` for text and tool loops,
@@ -779,6 +791,13 @@ All built-in provider families support nonblocking generation. Use
 on generation options to cancel, or `stop` on agent options.
 
 For manually managed requests, use `model.generate_async(request, callback, token)`.
+For streaming, use `stream_text_async(options, on_event, callback)` or
+`agent.stream_async(input, on_event, callback, options)`. Built-in providers use
+native async I/O for streams. Set `options.tool_loop.async.schedule` to deliver
+callbacks through your application's scheduler. Agent memory loads and saves
+also run asynchronously. See the [streaming guide](docs/src/content/docs/guides/streaming.md)
+for callback scheduling and bounded event delivery.
+
 Check `model.adapter_capabilities().async_generation` when using a custom model.
 Embedding models provide `embed_async(text, callback, token)` and
 `embed_many_async(texts, callback, token)`, with `supports_async()` for custom models.

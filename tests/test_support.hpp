@@ -2,7 +2,9 @@
 
 #include <cail/generation.hpp>
 #include <cail/http.hpp>
+#include <cail/memory.hpp>
 
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -14,7 +16,7 @@
 
 namespace test {
 
-inline int failures{};
+inline std::atomic<int> failures{};
 
 inline void check(bool condition, std::string_view message) {
   if (!condition) {
@@ -40,6 +42,34 @@ struct ToolInput {
 
 struct ToolOutput {
   int count{};
+};
+
+// Inline memory keeps deferred-provider tests deterministic. Worker-backed stores
+// and asynchronous store contracts are exercised separately.
+class InlineMemory : public cail::ConversationMemory {
+public:
+  cail::InMemoryConversationMemory storage;
+  cail::Result<std::vector<cail::Message>> load(const std::string& id) override {
+    return storage.load(id);
+  }
+  cail::Result<void> append(const std::string& id, std::vector<cail::Message> messages) override {
+    return storage.append(id, std::move(messages));
+  }
+  cail::Result<void> clear(const std::string& id) override { return storage.clear(id); }
+  cail::Result<void> load_async(std::string id, LoadCompletion complete,
+                                std::stop_token stop) override {
+    complete(stop.stop_requested() ? cail::Result<std::vector<cail::Message>>{std::unexpected(
+                                         cail::generation_cancelled_error())}
+                                   : load(id));
+    return {};
+  }
+  cail::Result<void> append_async(std::string id, std::vector<cail::Message> messages,
+                                  Completion complete, std::stop_token stop) override {
+    complete(stop.stop_requested()
+                 ? cail::Result<void>{std::unexpected(cail::generation_cancelled_error())}
+                 : append(id, std::move(messages)));
+    return {};
+  }
 };
 
 class StubTransport final : public cail::HttpTransport {

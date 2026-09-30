@@ -2,6 +2,9 @@
 
 #include <cail/cail.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <optional>
 #include <utility>
 
@@ -125,6 +128,8 @@ void test_tool_loop() {
   std::vector<cail::LanguageModel::GenerationCompletion> pending;
   std::vector<cail::GenerationRequest> requests;
   std::stop_source stop;
+  std::promise<void> follow_up;
+  auto follow_up_ready = follow_up.get_future();
   cail::LanguageModel model(
       {}, {}, {},
       [&](cail::GenerationRequest request, cail::LanguageModel::GenerationCompletion complete,
@@ -132,15 +137,20 @@ void test_tool_loop() {
         check(token == stop.get_token(), "async tool requests receive stop token");
         requests.push_back(std::move(request));
         pending.push_back(std::move(complete));
+        if (requests.back().step == 1) {
+          follow_up.set_value();
+        }
         return {};
       });
   int tool_calls = 0;
   auto tool = cail::tool<ToolInput, ToolOutput>(
       "count", "Count", [&](const ToolInput& input, const cail::ToolContext& context) {
         ++tool_calls;
-        check(context.stop == stop.get_token(), "tool handlers receive cancellation token");
+        check(context.stop.stop_possible(), "tool handlers receive cancellation token");
         return ToolOutput{.count = static_cast<int>(input.query.size())};
       });
+  std::promise<cail::Result<cail::GenerationResponse>> finished;
+  auto final_result = finished.get_future();
   std::optional<cail::Result<cail::GenerationResponse>> result;
   const auto started =
       cail::generate_text_async({.model = model,
@@ -150,11 +160,12 @@ void test_tool_loop() {
                                  .session_id = "session",
                                  .max_output_tokens = 123,
                                  .provider_options = {{"custom", "value"}}},
-                                [&](auto response) { result = std::move(response); });
+                                [&](auto response) { finished.set_value(std::move(response)); });
   check(started && !result && pending.size() == 1, "async tool loop starts first request");
   auto first = std::move(pending[0]);
   first(cail::GenerationResponse{
       .tool_calls = {{.id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}}});
+  follow_up_ready.get();
   check(!result && tool_calls == 1 && pending.size() == 2 && requests[1].step == 1 &&
             requests[1].session_id == "session" && requests[1].max_output_tokens == 123 &&
             requests[1].provider_options.contains("custom") &&
@@ -162,6 +173,7 @@ void test_tool_loop() {
         "async tool loop preserves options and submits tool output");
   auto second = std::move(pending[1]);
   second(cail::GenerationResponse{.text = "done"});
+  result = final_result.get();
   check(result && *result && (*result)->turn.size() == 3 && (*result)->tool_results.size() == 1 &&
             (*result)->tool_results.front().output == R"({"count":3})",
         "async tool loop returns final response, history, and typed results");
@@ -171,8 +183,7 @@ void test_tool_loop() {
     int executed = 0;
     auto cancel_tool = cail::tool<ToolInput, ToolOutput>(
         "cancel", "Cancel", [&](const ToolInput&, const cail::ToolContext& context) {
-          check(context.stop == cancelled.get_token(),
-                "both tool loops propagate cancellation to handlers");
+          check(context.stop.stop_possible(), "both tool loops propagate cancellation to handlers");
           ++executed;
           cancelled.request_stop();
           return ToolOutput{};
@@ -195,9 +206,13 @@ void test_tool_loop() {
                                       .tool_loop = {.stop = cancelled.get_token()}};
     result.reset();
     if (async) {
-      check(cail::generate_text_async(options, [&](auto value) { result = std::move(value); })
+      std::promise<cail::Result<cail::GenerationResponse>> completed;
+      auto response = completed.get_future();
+      check(cail::generate_text_async(options,
+                                      [&](auto value) { completed.set_value(std::move(value)); })
                 .has_value(),
             "inline async cancellation request starts");
+      result = response.get();
     } else {
       result = cail::generate_text(options);
     }
@@ -226,13 +241,17 @@ void test_inline_and_failures() {
         }
         return {};
       });
+  std::promise<void> completed;
+  auto done = completed.get_future();
   const auto inline_started = cail::generate_text_async(
       {.model = model, .prompt = "hello", .tools = {tool}, .tool_loop = {.max_rounds = 2000}},
       [&](auto response) {
         ++callbacks;
         check(response && response->tool_results.size() == 2000,
               "inline async completions finish a long tool loop");
+        completed.set_value();
       });
+  done.get();
   check(inline_started && callbacks == 1 && rounds == 2001,
         "inline callbacks do not recursively grow the stack");
   int rejected_callbacks = 0;
@@ -259,11 +278,13 @@ void test_inline_and_failures() {
             .tool_calls = {{.id = "call", .name = "count", .arguments = R"({"query":"x"})"}}});
         return {};
       });
-  std::optional<cail::Result<cail::GenerationResponse>> result;
+  std::promise<cail::Result<cail::GenerationResponse>> failure;
+  auto failed = failure.get_future();
   const auto started =
       cail::generate_text_async({.model = failing, .prompt = "hello", .tools = {tool}},
-                                [&](auto value) { result = std::move(value); });
-  check(started && result && !*result && result->error().code == cail::ErrorCode::transport,
+                                [&](auto value) { failure.set_value(std::move(value)); });
+  const auto result = failed.get();
+  check(started && !result && result.error().code == cail::ErrorCode::transport,
         "follow-up initiation errors reach the completion");
 }
 
@@ -309,7 +330,8 @@ void test_embeddings() {
         "in-flight embeddings report cancellation");
   int callbacks = 0;
   check(!model.embed_many_async({}, [&](auto) { ++callbacks; }) &&
-            !model.embed_async("", [&](auto) { ++callbacks; }) && !model.embed_async("one", {}) &&
+            !model.embed_async("", [&](auto) { ++callbacks; }) &&
+            !model.embed_async("one", cail::EmbeddingModel::EmbeddingCompletion{}) &&
             !model.embed_many({"one"}, stop.get_token()) && callbacks == 0,
         "embedding validation and prior cancellation prevent requests");
   auto gemini_state = std::make_shared<PendingHttp>();
@@ -345,7 +367,7 @@ void test_objects_and_agents() {
   check(!cail::generate_object_async<Address>({.model = model, .prompt = "hello"}, {}),
         "async objects reject an empty completion");
 
-  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  auto memory = std::make_shared<InlineMemory>();
   check(
       memory
           ->append("conversation", {cail::Message{.content = {cail::TextPart{.text = "earlier"}}}})
@@ -393,7 +415,7 @@ void test_objects_and_agents() {
 
 void test_async_multimodal_memory() {
   auto state = std::make_shared<PendingHttp>();
-  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  auto memory = std::make_shared<InlineMemory>();
   std::optional<cail::Result<cail::GenerationResponse>> response;
   const std::string binary{"\0\xff\x89", 3};
   {

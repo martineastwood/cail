@@ -118,26 +118,87 @@ requests, use `run_tool_loop_async(model, request, tools, callback, options)`.
 The same `max_rounds`, `stop_when`, and middleware options apply to blocking,
 streaming, and async tool loops.
 
-Tool handlers execute synchronously on the thread processing the model result.
-With async generation this may be an I/O thread, so keep handlers brief. A handler
-that takes time can check `context.stop.stop_requested()` to stop cooperatively.
-You can accept a `const cail::ToolContext&` as your handler's second argument:
+Async generation runs tool handlers on a worker, so a slow synchronous tool does
+not occupy the provider's completion thread. Calls execute in model order. The
+first tool error ends the loop, and later calls do not start.
+
+For a tool that already provides an asynchronous API, use `async_tool`. Pass the
+input and context by value and call the completion callback exactly once with
+`cail::Result<Output>`. You can complete inline or retain the callback until your
+operation finishes:
 
 ```cpp
-auto weather_tool = cail::tool<WeatherQuery, WeatherReport>(
+auto weather_tool = cail::async_tool<WeatherQuery, WeatherReport>(
     "weather", "Get the weather in a location.",
-    [](const WeatherQuery& query, const cail::ToolContext& context)
-        -> cail::Result<WeatherReport> {
+    [](WeatherQuery query, cail::ToolContext context,
+       std::function<void(cail::Result<WeatherReport>)> complete) {
         if (context.stop.stop_requested()) {
-            return std::unexpected(cail::generation_cancelled_error());
+            complete(std::unexpected(cail::generation_cancelled_error()));
+            return;
         }
-        return WeatherReport{.location = query.location, .temperature_fahrenheit = 72};
+        complete(WeatherReport{.location = query.location,
+                               .temperature_fahrenheit = 72});
     });
 ```
 
-Set `tool_loop.stop` on your generation options. Cancellation prevents subsequent
-tools and model steps from starting. It cannot force an active tool handler to exit.
-See [Advanced usage](/guides/advanced/) for callback lifetime and cancellation.
+Set `tool_loop.stop` to a token from `std::stop_source`. Cancellation prevents
+subsequent tools and model steps from starting. While waiting for an async tool,
+the loop returns a cancellation error without waiting for that tool's callback.
+A late callback is safely ignored. Your tool still owns its active work and must
+observe `context.stop` to stop it. A synchronous handler must return before the
+loop can finish cancellation. Waiting for an async tool's callback does not
+occupy a CAIL worker.
+
+You can also use an async tool with blocking generation, which waits for its
+completion. Keep your application running until generation and any cancelled
+tool work have finished. Handle errors in your completion callback. CAIL contains
+exceptions thrown by terminal completion callbacks and does not call them again.
+Callbacks that access application state must synchronize access from other threads.
+
+## Stream without blocking the caller
+
+`stream_text_async` returns after accepting the stream. Its completion callback
+receives the final response after all tool rounds:
+
+```cpp
+std::stop_source stop;
+auto started = cail::stream_text_async(
+    {.model = cail::openai("gpt-6-luna"),
+     .prompt = "Fetch the weather for Paris.",
+     .tools = {weather_tool},
+     .tool_loop = {.stop = stop.get_token()}},
+    [](const cail::StreamEvent& event) {
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+            std::cout << delta->text << std::flush;
+    },
+    [](cail::Result<cail::GenerationResponse> result) {
+        if (!result) std::cerr << result.error().message << '\n';
+    });
+if (!started) std::cerr << started.error().message << '\n';
+```
+
+Events arrive serially on the provider's delivery thread. Each handler must
+return before the stream continues reading, so slow consumers apply backpressure.
+Built-in HTTP providers deliver events on an I/O thread. Start async requests
+from an event handler; a blocking HTTP request there returns an
+`invalid_configuration` error.
+
+Built-in providers use native async streaming, so active streams do not occupy
+a blocking worker. Up to four synchronous tool handlers can run concurrently,
+with up to 256 queued jobs. A full queue returns an
+`invalid_configuration` error. For a tool-loop step that cannot be queued, the
+error reaches the generation completion callback. Cancelling queued work
+completes it without starting its handler or waiting for an available worker.
+
+Call `stop.request_stop()` to cancel. No further events are delivered once the
+provider observes cancellation. An active event handler must return before
+cancellation can finish. An event handler exception ends the stream with an
+error. An initiation error is returned directly without calling completion;
+a successfully started operation calls completion once.
+
+For manually managed requests, use `LanguageModel::stream_async` or
+`stream_tool_loop_async`, or `agent.stream_async(input, on_event, complete, options)`. The same `max_rounds`, `stop_when`, and middleware
+options apply.
 
 ## Next steps
 

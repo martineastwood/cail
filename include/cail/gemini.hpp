@@ -561,7 +561,73 @@ public:
                                                std::move(complete), stop, decode_http_response);
   }
 
+  [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
+                                          LanguageModel::GenerationCompletion complete,
+                                          std::stop_token stop = {}) const {
+    if (!on_event || !complete)
+      return std::unexpected(
+          Error{.code = ErrorCode::invalid_configuration,
+                .message = "Async streaming requires event and completion handlers."});
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto http = make_http_request(request, true);
+    if (!http)
+      return std::unexpected(http.error());
+    auto state = std::make_shared<StreamState>();
+    state->handler = std::move(on_event);
+    state->stop = stop;
+    return cail::detail::stream_generation_async(
+        *transport_, std::move(request), std::move(*http),
+        [state](std::string_view bytes) { state->feed(bytes); }, std::move(complete), stop,
+        [state](const HttpResponse& response) { return state->finish(response); });
+  }
+
 private:
+  struct StreamState {
+    StreamHandler handler;
+    std::stop_token stop;
+    cail::detail::SseParser parser;
+    GenerationResponse result;
+    std::optional<Error> stream_error;
+    bool received = false;
+    void handle_event(const cail::detail::ServerSentEvent& event) {
+      if (stop.stop_requested() || stream_error || event.data.empty())
+        return;
+      ResponseBody chunk;
+      if (const auto error =
+              glz::read<glz::opts{.error_on_unknown_keys = false}>(chunk, event.data);
+          error)
+        stream_error = Error{.code = ErrorCode::provider_response,
+                             .message = glz::format_error(error, event.data)};
+      else {
+        received = true;
+        auto applied = apply_chunk(result, chunk, handler);
+        if (!applied)
+          stream_error = applied.error();
+      }
+    }
+    void feed(std::string_view bytes) {
+      parser.feed(bytes, [this](const auto& event) { handle_event(event); });
+    }
+    Result<GenerationResponse> finish(const HttpResponse& response) {
+      if (stop.stop_requested())
+        return std::unexpected(generation_cancelled_error());
+      const auto context = [&](Error error) {
+        return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+      };
+      if (is_http_error_status(response.status_code)) {
+        return context(http_status_error_from_json_body(response));
+      }
+      parser.finish([this](const auto& event) { handle_event(event); });
+      if (stream_error)
+        return context(*stream_error);
+      if (!received)
+        return context(Error{.code = ErrorCode::provider_response,
+                             .message = "Gemini returned an empty stream."});
+      return result;
+    }
+  };
+
   [[nodiscard]] static Result<GenerationResponse>
   decode_http_response(const HttpResponse& response) {
     const auto context = [&](Error error) {
@@ -668,54 +734,20 @@ private:
     if (!prepared)
       return std::unexpected(prepared.error());
     auto http = std::move(*prepared);
-    cail::detail::SseParser parser;
-    GenerationResponse result;
-    std::optional<Error> stream_error;
-    bool received = false;
-    const auto handle_event = [&](const cail::detail::ServerSentEvent& event) {
-      if (stream_error || event.data.empty())
-        return;
-      ResponseBody chunk;
-      if (const auto error =
-              glz::read<glz::opts{.error_on_unknown_keys = false}>(chunk, event.data);
-          error)
-        stream_error = Error{.code = ErrorCode::provider_response,
-                             .message = glz::format_error(error, event.data)};
-      else {
-        received = true;
-        auto applied = apply_chunk(result, chunk, handler);
-        if (!applied)
-          stream_error = applied.error();
-      }
-    };
-    auto response =
-        handler ? transport_->stream(
-                      http, [&](std::string_view bytes) { parser.feed(bytes, handle_event); }, stop)
-                : transport_->send(http, stop);
+    StreamState state;
+    state.handler = handler;
+    state.stop = stop;
+    auto response = handler
+                        ? transport_->stream(
+                              http, [&state](std::string_view bytes) { state.feed(bytes); }, stop)
+                        : transport_->send(http, stop);
     if (!response)
       return std::unexpected(response.error());
-    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
+    if (auto middleware = cail::detail::run_after_response(request, *response); !middleware)
       return std::unexpected(middleware.error());
-    }
-
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
-    const auto context = [&](Error error) {
-      return unexpected_with_http_context<GenerationResponse>(std::move(error), *response);
-    };
-    if (is_http_error_status(response->status_code)) {
-      return context(http_status_error_from_json_body(*response));
-    }
-    if (handler) {
-      parser.finish(handle_event);
-      if (stream_error)
-        return context(*stream_error);
-      if (!received)
-        return context(Error{.code = ErrorCode::provider_response,
-                             .message = "Gemini returned an empty stream."});
-      return result;
-    }
-    return decode_http_response(*response);
+    return handler ? state.finish(*response) : decode_http_response(*response);
   }
   Config config_;
   std::unique_ptr<HttpTransport> transport_;
@@ -762,6 +794,15 @@ public:
                  std::stop_token stop) {
           return client->generate_async(
               std::move(request),
+              [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+                complete(std::move(result));
+              },
+              stop);
+        },
+        [client](GenerationRequest request, StreamHandler handler,
+                 LanguageModel::GenerationCompletion complete, std::stop_token stop) {
+          return client->stream_async(
+              std::move(request), std::move(handler),
               [client, complete = std::move(complete)](Result<GenerationResponse> result) {
                 complete(std::move(result));
               },

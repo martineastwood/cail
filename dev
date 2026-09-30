@@ -61,6 +61,7 @@ Commands:
   test [dir] [regex]    Run the CTest suites
   tidy [--fix]          Run clang-tidy over the test translation units
   sanitizer             Build and test with ASan and UBSan
+  thread-sanitizer      Build and test with ThreadSanitizer
   check                 Format check, configure, build, and test
   clean                 Remove the build directories
 
@@ -166,7 +167,7 @@ cmd_tidy() {
 
 cmd_sanitizer() {
   log "sanitizer ($SANITIZER_DIR)"
-  local flags="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+  local flags="${SANITIZER_FLAGS:--fsanitize=address,undefined -fno-omit-frame-pointer -g}"
   local cache=()
   [[ -n "${CAIL_FETCHCONTENT_BASE_DIR:-}" ]] &&
     cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
@@ -203,6 +204,10 @@ case "$command" in
   test) cmd_test "$@" ;;
   tidy) cmd_tidy "$@" ;;
   sanitizer) cmd_sanitizer "$@" ;;
+  thread-sanitizer)
+    SANITIZER_DIR="${THREAD_SANITIZER_DIR:-build/tsan}" \
+      SANITIZER_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" cmd_sanitizer "$@"
+    ;;
   check) cmd_check "$@" ;;
   clean) cmd_clean "$@" ;;
   -h | --help | help) usage ;;

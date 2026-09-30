@@ -105,9 +105,17 @@ jobs:
           ./dev test
 
   sanitizer:
-    name: ASan and UBSan
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan and UBSan
+            command: sanitizer
+          - name: ThreadSanitizer
+            command: thread-sanitizer
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -137,7 +145,7 @@ jobs:
           CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
         run: |
           mkdir -p .cache/cail-fetchcontent
-          ./dev sanitizer
+          ./dev ${{ matrix.command }}
 
   tidy:
     name: clang-tidy

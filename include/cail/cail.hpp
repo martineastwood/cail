@@ -2,6 +2,7 @@
 
 #include <cail/agent.hpp>
 #include <cail/anthropic.hpp>
+#include <cail/async.hpp>
 #include <cail/chat_completions.hpp>
 #include <cail/embedding_model.hpp>
 #include <cail/error.hpp>
@@ -23,4 +24,5 @@
 #include <cail/opencode.hpp>
 #include <cail/openrouter.hpp>
 #include <cail/schema.hpp>
+#include <cail/task.hpp>
 #include <cail/tool.hpp>

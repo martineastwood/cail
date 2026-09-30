@@ -8,11 +8,15 @@ cmake --build build/dev --target cail_async_load
 python3 tests/local_http_server.py build/dev/cail_async_load
 ```
 
-The benchmark sends four blocking requests and then 64 async requests to an endpoint
-that waits one second before responding. It prints the time to start and finish the
-async requests, the client process's thread count and resident memory before and
-during the async calls, and whether three sequential requests reused one HTTP
-connection.
+The benchmark sends four blocking requests, then runs batches of 64 requests
+through model generation, text generation, a tool loop, and streaming. Generation
+endpoints wait one second before responding. Tool handlers take 20 milliseconds;
+streams return immediately.
+
+Each batch prints launch time, total time, peak client thread count, and peak
+resident memory sampled throughout the batch, including completion. The sampler
+adds one thread. The benchmark also checks whether three sequential HTTP requests
+reuse one connection.
 
 Run it on the machine where you expect to use CAIL. The local server and network
 stack affect the results, so compare runs on the same machine and build settings.

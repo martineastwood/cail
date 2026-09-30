@@ -1,5 +1,7 @@
 #include "test_support.hpp"
 
+#include <future>
+
 #include <cail/agent.hpp>
 #include <cail/memory.hpp>
 
@@ -422,9 +424,14 @@ void test_multimodal_agent_memory() {
           }
         });
       } else {
-        check(agent.generate_async(message, [&](auto result) { first = std::move(result); })
+        std::promise<cail::Result<cail::GenerationResponse>> completed;
+        auto pending = completed.get_future();
+        check(agent
+                  .generate_async(message,
+                                  [&](auto result) { completed.set_value(std::move(result)); })
                   .has_value(),
               "multimodal async agent starts");
+        first = pending.get();
       }
       check(first && first->text == "counted" && first->tool_results.size() == 1,
             "multimodal agent inputs run the tool loop in all execution modes");
@@ -528,15 +535,14 @@ void test_multimodal_input_validation() {
   check(calls == 0, "invalid memory input never reaches the model");
   check(!agent.generate(multimodal_message()) && !agent.stream(multimodal_message(), ignore),
         "multimodal model failures propagate");
-  bool callback = false;
-  check(agent.generate_async(multimodal_message(),
-                             [&](auto result) {
-                               callback = true;
-                               check(!result, "async multimodal model failures propagate");
-                             })
-                .has_value() &&
-            callback,
-        "a started async multimodal request reports failure through completion");
+  std::promise<cail::Result<cail::GenerationResponse>> completed;
+  auto completion = completed.get_future();
+  check(agent
+            .generate_async(multimodal_message(),
+                            [&](auto result) { completed.set_value(std::move(result)); })
+            .has_value(),
+        "an async multimodal request starts before memory loading finishes");
+  check(!completion.get(), "a started async multimodal request reports failure through completion");
   check(memory->load("conversation")->empty(), "failed multimodal calls store no attachments");
   std::stop_source stop;
   stop.request_stop();

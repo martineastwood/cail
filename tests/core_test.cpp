@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <cail/agent.hpp>
+#include <cail/detail/strict_schema.hpp>
 #include <cail/field.hpp>
 #include <cail/generate.hpp>
 #include <cail/json.hpp>
@@ -35,6 +36,33 @@ void test_control_character_json() {
   check(!error && parsed["city"].get<std::string>() == controls &&
             parsed["extra"].get<std::string>() == std::string(1, '\0'),
         "merged JSON preserves control characters in both objects");
+}
+
+void test_additional_properties_schema() {
+  for (const auto value : {"false", "true", "{}", R"({"type":"string"})",
+                           R"({"anyOf":[{"type":"string"},{"type":"number"}]})"}) {
+    const auto json = std::string{R"({"type":"object","additionalProperties":)"} + value + "}";
+    const auto schema = cail::schema_from_json(json);
+    check(schema.has_value(), "additionalProperties accepts booleans and schema objects");
+    if (!schema) {
+      continue;
+    }
+    const auto encoded = cail::to_json(*schema);
+    const auto decoded = encoded ? cail::schema_from_json(*encoded) : cail::Result<cail::Schema>{};
+    check(decoded && decoded->additional_properties &&
+              cail::to_json(*decoded->additional_properties) == std::string{value},
+          "additionalProperties round-trips without losing schema constraints");
+    const auto strict = cail::detail::strict_json_schema(*schema);
+    check(strict.has_value() == (std::string_view{value} == "false"),
+          "strict output rejects open and schema-valued additional properties");
+  }
+  for (const auto value : {"null", "42", R"("false")", "[]"}) {
+    const auto json = std::string{R"({"type":"object","additionalProperties":)"} + value + "}";
+    check(!cail::schema_from_json(json), "additionalProperties rejects invalid value types");
+  }
+  const auto nested = cail::schema_from_json(
+      R"({"type":"object","properties":{"headers":{"type":"object","additionalProperties":{"type":"string"}}}})");
+  check(nested.has_value(), "MCP tool schemas accept nested maps");
 }
 
 void test_field_value_api() {
@@ -505,6 +533,7 @@ void test_async_transport_retries() {
 
 int main() {
   test::test_control_character_json();
+  test::test_additional_properties_schema();
   test::test_field_value_api();
   test::test_optional_schema_and_json();
   test::test_tool_loop();

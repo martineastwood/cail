@@ -5,6 +5,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -21,7 +22,7 @@ struct CountInput {
 
 namespace {
 
-int failures{};
+std::atomic<int> failures{};
 
 void check(bool condition, std::string_view name) {
   if (!condition) {
@@ -35,6 +36,41 @@ cail::GenerationRequest prompt() {
               .role = cail::MessageRole::user,
               .content = {cail::TextPart{.text = "Hello"}},
           }}};
+}
+
+cail::Task<void> coroutine_http(std::string base) {
+  auto model = cail::create_local({.endpoint = base + "/chat"})("test-model");
+  const auto thread = std::this_thread::get_id();
+  const auto response = co_await cail::generate_text_async({.model = model, .prompt = "Hello"});
+  check(response && response->text == "Hello" && std::this_thread::get_id() == thread,
+        "coroutine generation awaits live HTTP and resumes on its caller executor");
+  std::string text;
+  const auto streamed = co_await cail::stream_text_async(
+      {.model = model, .prompt = "Hello"}, [&](const cail::StreamEvent& event) {
+        check(std::this_thread::get_id() == thread,
+              "live coroutine SSE events run on the caller executor");
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+          text += delta->text;
+      });
+  check(streamed && text == "Hi",
+        "coroutine streaming delivers live events before its final response");
+  auto count =
+      cail::tool<CountInput, int>("count", "Count characters", [](const CountInput& input) {
+        return static_cast<int>(input.query.size());
+      });
+  const auto tools = co_await cail::generate_text_async(
+      {.model = cail::create_local({.endpoint = base + "/tool-chat"})("test-model"),
+       .prompt = "Count abc",
+       .tools = {count}});
+  check(tools && tools->text == "Done" && tools->tool_results.size() == 1,
+        "coroutine generation awaits the whole live tool loop");
+  cail::Agent agent({.model = model,
+                     .memory = std::make_shared<cail::InMemoryConversationMemory>(),
+                     .conversation_id = "coroutine"});
+  const auto first = co_await agent.generate_async("Hello");
+  const auto second = co_await agent.generate_async("Again");
+  check(first && second,
+        "sequential coroutine agent calls await native HTTP and memory persistence");
 }
 
 } // namespace
@@ -215,6 +251,152 @@ int main(int argc, char** argv) {
   check(loop_response && loop_response->text == "Done" && loop_response->tool_results.size() == 1 &&
             loop_response->tool_results.front().output == "3",
         "async tool loop executes tools over live HTTP");
+
+  // Direct transports own active I/O even after the caller destroys the wrapper.
+  auto raw_completion = std::make_shared<std::promise<cail::Result<cail::HttpResponse>>>();
+  auto raw_result = raw_completion->get_future();
+  {
+    cail::detail::GlazeHttpTransport transport;
+    transport.send_async(
+        {.url = base + "/chat/delay", .body = "{}"},
+        [raw_completion](auto response) { raw_completion->set_value(std::move(response)); }, {});
+  }
+  check(raw_result.get().has_value(), "active HTTP owns its client after transport destruction");
+
+  auto nested_completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+  auto nested_result = nested_completion->get_future();
+  auto reentrant = cail::create_local({.endpoint = base + "/chat"})("test-model");
+  check(reentrant
+            .generate_async(
+                prompt(),
+                [reentrant, nested_completion](auto response) {
+                  check(response.has_value(), "outer async HTTP request succeeds");
+                  const auto blocked = reentrant.generate(prompt());
+                  check(!blocked && blocked.error().code == cail::ErrorCode::invalid_configuration,
+                        "blocking generation inside an I/O callback fails instead of deadlocking");
+                  check(reentrant
+                            .generate_async(prompt(),
+                                            [nested_completion](auto next) {
+                                              nested_completion->set_value(std::move(next));
+                                            })
+                            .has_value(),
+                        "an I/O callback can initiate another async request");
+                })
+            .has_value(),
+        "reentrant callback test starts");
+  check(nested_result.get().has_value(), "nested async HTTP request completes");
+
+  std::string async_deltas;
+  auto stream_completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+  auto stream_result = stream_completion->get_future();
+  check(
+      cail::stream_text_async(
+          {.model = reentrant, .prompt = "hello"},
+          [&](const cail::StreamEvent& event) {
+            if (const auto* text = std::get_if<cail::TextDelta>(&event)) {
+              async_deltas += text->text;
+              const auto blocked = reentrant.generate(prompt());
+              check(
+                  !blocked && blocked.error().code == cail::ErrorCode::invalid_configuration,
+                  "blocking generation inside an HTTP event handler fails instead of deadlocking");
+            }
+          },
+          [stream_completion](auto response) { stream_completion->set_value(std::move(response)); })
+          .has_value(),
+      "async streaming starts over live HTTP");
+  const auto async_stream = stream_result.get();
+  check(async_stream && async_stream->text == "Hi" && async_deltas == "Hi",
+        "async streaming delivers live SSE events and its final response");
+
+  auto cancelled_stream = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+  auto cancelled_stream_result = cancelled_stream->get_future();
+  std::stop_source stream_stop;
+  check(
+      cail::stream_text_async(
+          {.model = held_model, .prompt = "hello", .tool_loop = {.stop = stream_stop.get_token()}},
+          [&](const auto&) { stream_stop.request_stop(); },
+          [cancelled_stream](auto response) { cancelled_stream->set_value(std::move(response)); })
+          .has_value(),
+      "cancellable async stream starts over live HTTP");
+  const auto stopped_stream = cancelled_stream_result.get();
+  check(!stopped_stream && stopped_stream.error().code == cail::ErrorCode::cancelled,
+        "cancellation from an async SSE event ends the live stream");
+
+  // One model multiplexes streams without a blocking-worker admission limit.
+  std::vector<std::stop_source> stream_stops(8);
+  std::vector<std::future<void>> connected;
+  std::vector<std::future<cail::Result<cail::GenerationResponse>>> stream_results;
+  for (auto& stop : stream_stops) {
+    auto first_event = std::make_shared<std::promise<void>>();
+    auto seen = std::make_shared<std::atomic<bool>>(false);
+    connected.push_back(first_event->get_future());
+    auto finished = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+    stream_results.push_back(finished->get_future());
+    check(held_model
+              .stream_async(
+                  prompt(),
+                  [first_event, seen](const auto&) {
+                    if (!seen->exchange(true))
+                      first_event->set_value();
+                  },
+                  [finished](auto response) { finished->set_value(std::move(response)); },
+                  stop.get_token())
+              .has_value(),
+          "concurrent native HTTP stream starts");
+  }
+  for (auto& ready : connected)
+    check(ready.wait_for(std::chrono::seconds{5}) == std::future_status::ready,
+          "all eight native streams connect before any stream finishes");
+  for (auto& stop : stream_stops)
+    stop.request_stop();
+  for (auto& result : stream_results) {
+    check(result.wait_for(std::chrono::seconds{2}) == std::future_status::ready,
+          "native HTTP stream cancellation completes promptly");
+    const auto response = result.get();
+    check(!response && response.error().code == cail::ErrorCode::cancelled,
+          "each multiplexed stream reports cancellation");
+  }
+
+  std::vector<cail::LanguageModel> native_stream_models{
+      cail::create_openai({.api_key = "test-key", .base_url = base})("test-model"),
+      cail::create_local({.endpoint = base + "/chat"})("test-model"),
+      cail::create_anthropic({.api_key = "test-key", .base_url = base + "/anthropic"})(
+          "test-model"),
+      cail::create_gemini({.api_key = "test-key", .base_url = base + "/gemini"})("test-model"),
+  };
+  for (const auto& model : native_stream_models) {
+    std::promise<cail::Result<cail::GenerationResponse>> finished;
+    auto result = finished.get_future();
+    std::string text;
+    check(model.adapter_capabilities().async_streaming &&
+              model
+                  .stream_async(
+                      prompt(),
+                      [&](const auto& event) {
+                        if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+                          text += delta->text;
+                      },
+                      [&](auto response) { finished.set_value(std::move(response)); })
+                  .has_value(),
+          "each provider family supports native asynchronous SSE");
+    const auto response = result.get();
+    check(response && response->text == "Hi" && text == "Hi",
+          "native SSE decoding preserves provider events and final text");
+  }
+
+  auto thrown = std::make_shared<std::promise<void>>();
+  auto thrown_result = thrown->get_future();
+  check(reentrant
+            .generate_async(prompt(),
+                            [thrown](auto) {
+                              thrown->set_value();
+                              throw std::runtime_error("completion failed");
+                            })
+            .has_value(),
+        "throwing HTTP completion starts");
+  thrown_result.get();
+  check(reentrant.generate(prompt()).has_value(),
+        "I/O workers remain usable after a throwing completion");
 
   const auto keyed_local =
       cail::create_local({.api_key = "key", .endpoint = base + "/local/chat"})("test-model")
@@ -465,6 +647,8 @@ int main(int argc, char** argv) {
   check(!cancelled && cancelled.error().code == cail::ErrorCode::cancelled &&
             std::chrono::steady_clock::now() - began < std::chrono::seconds(2),
         "Chat Completions cancels the live HTTP stream");
+
+  cail::run(coroutine_http(base));
 
   return failures == 0 ? 0 : 1;
 }

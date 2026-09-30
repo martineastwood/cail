@@ -43,7 +43,8 @@ inline void make_nullable(Schema& schema) {
 
   Schema result = schema;
   if (has_schema_type(schema, SchemaType::object)) {
-    if (schema.additional_properties.value_or(false)) {
+    if (schema.additional_properties && (!schema.additional_properties->is_boolean() ||
+                                         schema.additional_properties->get<bool>())) {
       return std::unexpected(Error{
           .code = ErrorCode::unsupported_schema,
           .message = "Strict JSON Schema output does not allow additional properties.",
