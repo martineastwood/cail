@@ -54,57 +54,87 @@ For a direct model call, pass the token as the second argument to
 
 ## Generate without blocking
 
-Chat Completions models can send a request and return immediately. Use
-`generate_async()` when you want CAIL to call you after the response arrives.
-This example assumes an OpenAI-compatible local server with a `llama3.2` model:
+You can start generation and receive the result in a completion callback.
+`generate_text_async` accepts the same options as `generate_text`, including
+system prompts, messages, tools, middleware, and cancellation.
+
+Set `OPENAI_API_KEY` and run this example:
 
 ```cpp
 #include <cail/cail.hpp>
+
 #include <future>
-#include <print>
+#include <iostream>
 
 int main() {
-    auto model = cail::create_local({
-        .endpoint = "http://localhost:11434/v1/chat/completions",
-    })("llama3.2");
     std::promise<void> finished;
     auto done = finished.get_future();
+    std::stop_source stop;
 
-    auto started = model.generate_async(
-        {.messages = {cail::Message{
-            .content = {cail::TextPart{.text = "Explain RAII in one sentence."}},
-        }}},
+    auto started = cail::generate_text_async(
+        {
+            .model = cail::openai("gpt-6-luna"),
+            .prompt = "Explain RAII in one sentence.",
+            .tool_loop = {.stop = stop.get_token()},
+        },
         [&finished](cail::Result<cail::GenerationResponse> result) {
-            if (result) std::println("{}", result->text);
-            else std::println(stderr, "{}", result.error().message);
+            if (result) std::cout << result->text << '\n';
+            else std::cerr << result.error().message << '\n';
             finished.set_value();
         });
 
     if (!started) {
-        std::println(stderr, "{}", started.error().message);
+        std::cerr << started.error().message << '\n';
         return 1;
     }
-    done.wait(); // Keep this small program alive until the callback finishes.
+    done.wait(); // Keep this example alive until the callback finishes.
 }
 ```
 
-The return value reports whether the request started. Once it starts, the
-completion callback receives either the response or an error, including
-`ErrorCode::cancelled` if you request a stop. The callback may run on a CAIL I/O
-thread, so pass work to your application's executor if it takes time. Keep the
-callback free of uncaught exceptions.
-Keep any objects captured by reference in the callback or middleware alive until
-the callback finishes.
+The return value reports whether the operation started. An immediate validation
+or cancellation error is returned without invoking the callback. After an
+operation starts, its completion callback receives one result: either a response
+or an error. With tools, completion happens after the final model step.
 
-To cancel, pass `stop.get_token()` as the third argument and call
-`stop.request_stop()`. A request that already started completes its callback
-with `ErrorCode::cancelled`.
+Built-in providers support async generation through OpenAI Responses, Chat
+Completions, Anthropic Messages, and Gemini. Azure Foundry and OpenCode use the
+same async APIs. For a custom model, check
+`model.adapter_capabilities().async_generation`. A custom HTTP transport must
+implement `send_async` for async requests.
 
-Check `model.adapter_capabilities().async_generation` before using this API
-with a model. It is currently available for Chat Completions providers, such as
-Local, OpenRouter, and Mistral. Other providers report that async generation is
-unavailable. Async tool loops and streaming are not yet available. If you use a
-custom HTTP transport for async calls, implement its `send_async()` operation.
+Requests own the model and input values until completion. Keep objects captured
+by reference in callbacks, middleware, or tools alive until completion. Callbacks
+can run before the initiating function returns, and may run on a CAIL I/O thread.
+Keep tool handlers and callbacks brief; schedule lengthy work on your application's
+executor. Callback exceptions must be handled by your application.
+
+Call `stop.request_stop()` to cancel. The token applies to active HTTP requests,
+retry delays, and later tool-loop steps. Tool handlers receive it through
+`ToolContext::stop`, so they can stop cooperatively. Cancellation prevents the
+remaining tools from starting after an active handler returns.
+
+### Other async calls
+
+| Task | Async call | Cancellation |
+| --- | --- | --- |
+| Text and tool loops | `generate_text_async(options, callback)` | `options.tool_loop.stop` |
+| Typed structured output | `generate_object_async<T>(options, callback)` | `options.tool_loop.stop` |
+| Agent prompts or requests | `agent.generate_async(input, callback, options)` | `options.stop` |
+| One embedding | `model.embed_async(text, callback, token)` | Third argument |
+| Embedding batch | `model.embed_many_async(texts, callback, token)` | Third argument |
+| Manually managed generation | `model.generate_async(request, callback, token)` | Third argument |
+
+`generate_object_async<T>` completes with `Result<T>` and reports the same
+refusal, incomplete response, and JSON decoding errors as `generate_object<T>`.
+Check `embedding_model.supports_async()` before async embedding calls with a
+custom model.
+
+Async agent text prompts and user messages load memory before starting the request and save successful
+turns before completion. Memory operations are synchronous. An explicit
+`GenerationRequest` bypasses memory, as with blocking agent calls.
+
+`stream_text` and `Agent::stream` still block the calling thread while delivering
+events. Use your application's executor when streaming must run off your UI thread.
 
 ## Timeouts and retries
 

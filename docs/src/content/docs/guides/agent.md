@@ -148,6 +148,57 @@ drive each round yourself, call the model with `LanguageModel::generate()`, or
 run `cail::run_tool_loop` and `cail::stream_tool_loop` directly as shown in
 [Tools](/guides/tools/).
 
+## Ask about an image or document
+
+Pass a user `Message` when your prompt includes images or PDFs:
+
+```cpp
+auto image = cail::load_image("chart.png");
+if (!image) {
+    std::cerr << image.error().message << '\n';
+    return 1;
+}
+auto response = agent.generate(cail::Message{
+    .content = {cail::TextPart{.text = "Explain this chart."}, std::move(*image)},
+});
+```
+
+Include `<cail/loaders.hpp>` and `<utility>`. You can include several text,
+image, and PDF parts in the same message. When you configure memory and a
+conversation id, successful turns save the full message and replay its
+attachments in later calls. The same input works with `stream` and
+`generate_async`. See [Memory](/guides/memory/) for a complete conversation example.
+
+Single-message inputs accept only the user role and cannot contain tool calls or
+a tool call ID. Use `GenerationRequest` when you manage the full history yourself.
+
+## Generate without blocking
+
+Call `generate_async` with a prompt and completion callback:
+
+```cpp
+auto started = weather_agent.generate_async(
+    "What should I pack for Paris?",
+    [](cail::Result<cail::GenerationResponse> result) {
+        if (result) std::cout << result->text << '\n';
+        else std::cerr << result.error().message << '\n';
+    });
+if (!started) {
+    std::cerr << started.error().message << '\n';
+}
+```
+
+The callback receives the final result after any tool calls. Keep your application
+running until it finishes. Text prompts and single user messages load configured memory before starting
+and append successful turns before invoking the callback. Memory operations are
+synchronous. Calls with an explicit `GenerationRequest` bypass memory.
+
+Pass `ToolLoopOptions` as the third argument to set `max_rounds`, `stop_when`, or
+`stop`. The request owns the model, tools, and memory backend until completion;
+objects captured by reference in handlers must remain valid. Avoid overlapping
+prompt calls for the same conversation because they can load the same history.
+See [Advanced usage](/guides/advanced/) for async execution and cancellation.
+
 ## Next steps
 
 - [Tools](/guides/tools/) for typed tool handlers and the loop in detail

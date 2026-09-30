@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cail/detail/async_http.hpp>
+
 #include <cail/detail/base64.hpp>
 #include <cail/detail/env.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
@@ -56,13 +58,56 @@ public:
     return stream(detail::user_prompt_request(prompt), on_event, stop);
   }
 
-private:
-  [[nodiscard]] Result<GenerationResponse> generate_impl(const GenerationRequest& request,
-                                                         const StreamHandler& on_event,
-                                                         std::stop_token stop = {}) const {
-    const bool streaming = static_cast<bool>(on_event);
-    if (stop.stop_requested()) {
+  [[nodiscard]] Result<void> generate_async(GenerationRequest request,
+                                            LanguageModel::GenerationCompletion complete,
+                                            std::stop_token stop = {}) const {
+    if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async generation requires a completion handler."});
+    auto http = make_http_request(request, false);
+    if (!http)
+      return std::unexpected(http.error());
+    return cail::detail::send_generation_async(*transport_, std::move(request), std::move(*http),
+                                               std::move(complete), stop, decode_http_response);
+  }
+
+private:
+  [[nodiscard]] static Result<GenerationResponse>
+  decode_http_response(const HttpResponse& response) {
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+    };
+    if (is_http_error_status(response.status_code)) {
+      auto error = http_status_error_from_json_body(response);
+      error.message = "OpenAI returned HTTP " + std::to_string(response.status_code) +
+                      (error.message.empty() ? "." : ": " + error.message);
+      return context(std::move(error));
+    }
+    wire::ResponseBody response_body{};
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(response_body, response.body);
+        error) {
+      return context(Error{
+          .code = ErrorCode::provider_response,
+          .message = glz::format_error(error, response.body),
+          .byte_offset = error.count,
+          .http_status = response.status_code,
+      });
+    }
+
+    auto result = wire::decode_response(std::move(response_body), response.status_code);
+    if (!result) {
+      return context(result.error());
+    }
+    return result;
+  }
+
+  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
+                                                      bool streaming) const {
+    if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
+      return std::unexpected(valid.error());
     }
     if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
       return std::unexpected(valid.error());
@@ -356,6 +401,19 @@ private:
       return std::unexpected(middleware.error());
     }
 
+    return http_request;
+  }
+
+  [[nodiscard]] Result<GenerationResponse> generate_impl(const GenerationRequest& request,
+                                                         const StreamHandler& on_event,
+                                                         std::stop_token stop = {}) const {
+    const bool streaming = static_cast<bool>(on_event);
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto prepared = make_http_request(request, static_cast<bool>(on_event));
+    if (!prepared)
+      return std::unexpected(prepared.error());
+    auto http_request = std::move(*prepared);
     cail::detail::SseParser sse_parser;
     std::optional<wire::ResponseBody> streamed_response;
     std::optional<Error> stream_error;
@@ -480,23 +538,7 @@ private:
       return result;
     }
 
-    wire::ResponseBody response_body{};
-    if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(
-            response_body, http_response->body);
-        error) {
-      return with_context(Error{
-          .code = ErrorCode::provider_response,
-          .message = glz::format_error(error, http_response->body),
-          .byte_offset = error.count,
-          .http_status = http_response->status_code,
-      });
-    }
-
-    auto result = wire::decode_response(std::move(response_body), http_response->status_code);
-    if (!result) {
-      return with_context(result.error());
-    }
-    return result;
+    return decode_http_response(*http_response);
   }
 
 public:
@@ -516,6 +558,7 @@ namespace cail::detail {
 [[nodiscard]] constexpr AdapterCapabilities openai_responses_adapter_capabilities() {
   return AdapterCapabilities{
       .image_input = true,
+      .pdf_input = true,
       .tools = true,
       .structured_output = true,
       .reasoning = true,
@@ -538,6 +581,15 @@ language_model_from(const std::shared_ptr<openai::Client>& client) {
       [client](const GenerationRequest& request, const StreamHandler& handler,
                std::stop_token stop) { return client->stream(request, handler, stop); },
       openai_responses_adapter_capabilities(),
+      [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+               std::stop_token stop) {
+        return client->generate_async(
+            std::move(request),
+            [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+              complete(std::move(result));
+            },
+            stop);
+      },
   };
 }
 

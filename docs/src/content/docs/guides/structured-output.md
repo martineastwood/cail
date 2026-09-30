@@ -56,6 +56,31 @@ auto analysis = cail::generate_object<Analysis>({
 The result is a `Result<Analysis>`. Check it before use, as shown in the
 [Quickstart](/guides/quickstart/).
 
+## Generate an object without blocking
+
+Use the same options with `generate_object_async<T>` and receive a typed result
+in your callback:
+
+```cpp
+auto started = cail::generate_object_async<Analysis>(
+    {
+        .model = cail::openai("gpt-6-luna"),
+        .prompt = "Classify this review: The delivery was fast and the product works well.",
+    },
+    [](cail::Result<Analysis> result) {
+        if (!result) std::cerr << result.error().message << '\n';
+        // Use the decoded Analysis when result succeeds.
+    });
+if (!started) {
+    std::cerr << started.error().message << '\n';
+}
+```
+
+Keep your application running until completion. The callback receives the same
+refusal, incomplete-response, and decoding errors as `generate_object<T>`.
+Set `tool_loop.stop` to cancel. See [Advanced usage](/guides/advanced/) for
+callback lifetime and execution details.
+
 ## Optional properties
 
 `std::optional<T>` fields are optional in CAIL schemas and deserialize from

@@ -36,7 +36,8 @@ supports:
 - Agents that bundle a model, standing instructions, and tools
 - Embeddings from any provider
 - An in-memory embedding store for search over small collections
-- Image inputs where the provider supports them
+- Local file, text, image, and PDF loaders
+- Image and PDF inputs where the provider supports them
 
 CAIL is header-only and targets C++23.
 
@@ -107,6 +108,32 @@ Run the remaining checks before you open a pull request:
 
 Formatting is pinned to `clang-format` 23.1.1. `./dev format` warns when your local
 version differs from the one CI uses.
+
+## Load a local file
+
+You can attach a local PDF to a user message:
+
+```cpp
+auto pdf = cail::load_pdf("report.pdf");
+if (!pdf) {
+    std::cerr << pdf.error().message << '\n';
+    return 1;
+}
+auto response = cail::generate_text({
+    .model = cail::openai("gpt-6-luna"),
+    .messages = {cail::Message{
+        .content = {cail::TextPart{.text = "Summarize this report."}, std::move(*pdf)},
+    }},
+});
+```
+
+Include `<cail/loaders.hpp>` or `<cail/cail.hpp>`. Use `load_text` for text,
+`load_image` for PNG, JPEG, GIF, or WebP, and `load_file` for raw bytes. All loaders
+return `Result<T>` and limit source files to 32 MiB by default.
+
+PDF inputs require a supporting model through OpenAI Responses, Anthropic, or
+Gemini. See [Files, images, and PDFs](docs/src/content/docs/guides/loaders.md)
+for complete examples, size limits, and error handling.
 
 ## Structured outputs
 
@@ -191,26 +218,24 @@ execute tools:
 
 ```cpp
 std::stop_source stop;
-auto result = cail::stream_tool_loop(
-    cail::openai("gpt-6-luna"),
-    cail::GenerationRequest{
-        .messages = {cail::Message{
-            .content = {cail::TextPart{.text = "Fetch the weather for Paris."}},
-        }},
+auto result = cail::stream_text(
+    {
+        .model = cail::openai("gpt-6-luna"),
+        .prompt = "Fetch the weather for Paris.",
+        .tools = {weather_tool},
+        .tool_loop = {
+            .max_rounds = 4,
+            .stop_when = [](const cail::GenerationResponse& response,
+                            const cail::MiddlewareContext&) {
+                return response.status == cail::GenerationStatus::refused;
+            },
+            .stop = stop.get_token(),
+        },
     },
-    std::vector<cail::Tool>{weather_tool},
     [](const cail::StreamEvent& event) {
         if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
             std::cout << delta->text << std::flush;
         }
-    },
-    {
-        .max_rounds = 4,
-        .stop_when = [](const cail::GenerationResponse& response,
-                        const cail::MiddlewareContext&) {
-            return response.status == cail::GenerationStatus::refused;
-        },
-        .stop = stop.get_token(),
     });
 ```
 
@@ -265,6 +290,30 @@ If your history lives in a database or another store, implement the
 [Memory](https://martineastwood.github.io/cail/guides/memory/) for the built-in and custom
 backends.
 
+Pass a single user `Message` to remember images and PDFs alongside text:
+
+```cpp
+auto pdf = cail::load_pdf("report.pdf");
+if (!pdf) {
+    std::cerr << pdf.error().message << '\n';
+    return 1;
+}
+auto first = weather_agent.generate(cail::Message{
+    .content = {cail::TextPart{.text = "Summarize this report."}, std::move(*pdf)},
+});
+if (!first) {
+    std::cerr << first.error().message << '\n';
+    return 1;
+}
+auto follow_up = weather_agent.generate("What is the main conclusion?");
+```
+
+`generate`, `stream`, and `generate_async` accept user messages through the same
+memory path. File memory preserves attachment bytes across restarts. Existing
+version 1 conversation files must be cleared before reuse with the new version 2
+format. See [Memory](docs/src/content/docs/guides/memory.md) for supported inputs,
+history limits, and resetting older conversations.
+
 For full control, pass a `GenerationRequest`. This overload bypasses memory: CAIL sends
 the messages you provide and does not load or store anything. It is useful for manually
 managed history and per-request options:
@@ -301,20 +350,22 @@ because `Agent` adds them as the system message.
 
 ## Streaming
 
-Use `LanguageModel::stream()` to receive events as they arrive. The call returns the
+Use `stream_text()` with the same options as `generate_text()` to receive events as they arrive. The call returns the
 complete `GenerationResponse` after the provider finishes:
 
 ```cpp
-auto response = cail::openai("gpt-6-luna").stream("Summarize this paragraph.", [](const cail::StreamEvent& event) {
-    if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
-        std::cout << delta->text << std::flush;
-    }
-});
+auto response = cail::stream_text(
+    {.model = cail::openai("gpt-6-luna"), .prompt = "Summarize this paragraph."},
+    [](const cail::StreamEvent& event) {
+        if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
+            std::cout << delta->text << std::flush;
+        }
+    });
 ```
 
 The callback can also receive `RefusalDelta`, `ReasoningDelta`, `ToolCallArgumentsDelta`,
 `ToolCallReady`, and `UsageUpdate`. Tool argument deltas and completed calls include an
-output index so you can match them. The callback runs synchronously while `stream()`
+output index so you can match them. The callback runs synchronously while `stream_text()`
 processes the response. The returned result reports success or failure and includes the
 final text, reasoning, tool calls, and usage.
 
@@ -330,12 +381,17 @@ from the callback:
 
 ```cpp
 std::stop_source stop;
-auto response = cail::openai("gpt-6-luna").stream("Write a long story.",
+auto response = cail::stream_text(
+    {
+        .model = cail::openai("gpt-6-luna"),
+        .prompt = "Write a long story.",
+        .tool_loop = {.stop = stop.get_token()},
+    },
     [&](const cail::StreamEvent& event) {
         if (std::holds_alternative<cail::TextDelta>(event)) {
             stop.request_stop();
         }
-    }, stop.get_token());
+    });
 // response.error().code is cail::ErrorCode::cancelled when stopped.
 ```
 
@@ -691,11 +747,22 @@ The default HTTP transport supports concurrent calls. A custom transport must al
 calls from multiple threads. Pass a `std::stop_token` to `model.generate(request, token)`
 to cancel a nonstreaming request.
 
-Chat Completions models also support nonblocking `model.generate_async(request, callback, token)`.
-The call returns after starting the request, and the callback receives the response or error.
-Check `model.adapter_capabilities().async_generation` before calling it. The callback may run
-on a CAIL I/O thread, so send lengthy work to your application's executor. See
-[Advanced usage](docs/src/content/docs/guides/advanced.md) for an example.
+All built-in provider families support nonblocking generation. Use
+`generate_text_async(options, callback)` for text and tool loops,
+`generate_object_async<T>(options, callback)` for typed output, or
+`agent.generate_async(input, callback, options)` for agents. Set `tool_loop.stop`
+on generation options to cancel, or `stop` on agent options.
+
+For manually managed requests, use `model.generate_async(request, callback, token)`.
+Check `model.adapter_capabilities().async_generation` when using a custom model.
+Embedding models provide `embed_async(text, callback, token)` and
+`embed_many_async(texts, callback, token)`, with `supports_async()` for custom models.
+Blocking embedding calls also accept a stop token.
+
+Async callbacks and tool handlers may run on a CAIL I/O thread. Tool handlers
+receive `ToolContext::stop` for cooperative cancellation. Keep reference captures
+valid until completion. See [Advanced usage](docs/src/content/docs/guides/advanced.md)
+for a complete example and callback behavior.
 
 Provider requests time out after 30 seconds and retry 429 and 5xx responses twice with
 exponential backoff. You can tune both when you create a model:
@@ -832,7 +899,7 @@ Set the provider's API key in your environment, then run the binaries from `./bu
 
 | Provider | Key | Examples |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY` | `cail_openai_prompt`, `cail_openai_stream`, `cail_openai_generate_object`, `cail_openai_tool_call`, `cail_openai_agent`, `cail_openai_embed`, `cail_openai_create` |
+| OpenAI | `OPENAI_API_KEY` | `cail_openai_prompt`, `cail_openai_stream`, `cail_openai_generate_object`, `cail_openai_tool_call`, `cail_openai_agent`, `cail_openai_embed`, `cail_openai_create`, `cail_openai_multimodal_memory` |
 | OpenRouter | `OPENROUTER_API_KEY` | `cail_openrouter_prompt`, `cail_openrouter_stream`, `cail_openrouter_object` |
 | Anthropic | `ANTHROPIC_API_KEY` | `cail_anthropic_prompt`, `cail_anthropic_stream`, `cail_anthropic_object`, `cail_anthropic_tool_call` |
 | Gemini | `GEMINI_API_KEY` | `cail_gemini_prompt`, `cail_gemini_stream`, `cail_gemini_object`, `cail_gemini_tool_call`, `cail_gemini_embed` |

@@ -10,11 +10,12 @@
 namespace cail {
 
 // Adapter wire capabilities. Does not guarantee the selected model accepts every feature.
-// `streaming` is derived from whether a stream function was provided.
+// Streaming and async generation are derived from the supplied functions.
 struct AdapterCapabilities {
   bool streaming{};
   bool async_generation{};
   bool image_input{};
+  bool pdf_input{};
   bool tools{};
   bool structured_output{};
   bool reasoning{};
@@ -26,6 +27,8 @@ public:
   using GenerationCompletion = std::function<void(Result<GenerationResponse>)>;
   using GenerateFunction =
       std::function<Result<GenerationResponse>(const GenerationRequest&, std::stop_token)>;
+  // Return an initiation error without calling completion, or complete exactly once.
+  // Completion may run inline; the operation must own everything needed until it finishes.
   using GenerateAsyncFunction =
       std::function<Result<void>(GenerationRequest, GenerationCompletion, std::stop_token)>;
   using StreamFunction = std::function<Result<GenerationResponse>(

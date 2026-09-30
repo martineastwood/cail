@@ -31,6 +31,12 @@ struct InputImagePart {
   std::string image_url;
 };
 
+struct InputFilePart {
+  std::string type{"input_file"};
+  std::string filename;
+  std::string file_data;
+};
+
 struct FunctionCallInput {
   std::string type{"function_call"};
   std::string call_id;
@@ -268,7 +274,7 @@ struct StreamEventBody {
     } else {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
-          .message = "OpenAI Responses supports image parts only in user messages.",
+          .message = "OpenAI Responses supports image and PDF parts only in user messages.",
       });
     }
   }
@@ -277,7 +283,7 @@ struct StreamEventBody {
 
 [[nodiscard]] inline Result<glz::raw_json> input_content(const Message& message) {
   const auto has_image = std::ranges::any_of(message.content, [](const ContentPart& part) {
-    return std::holds_alternative<ImagePart>(part);
+    return !std::holds_alternative<TextPart>(part);
   });
   if (!has_image) {
     auto value = text_content(message);
@@ -293,7 +299,7 @@ struct StreamEventBody {
   if (message.role != MessageRole::user) {
     return std::unexpected(Error{
         .code = ErrorCode::invalid_configuration,
-        .message = "OpenAI Responses supports image parts only in user messages.",
+        .message = "OpenAI Responses supports image and PDF parts only in user messages.",
     });
   }
 
@@ -306,6 +312,15 @@ struct StreamEventBody {
         continue;
       }
       encoded = to_json(InputTextPart{.text = value->text});
+    } else if (const auto* pdf = std::get_if<PdfPart>(&part)) {
+      if (pdf->bytes.empty() || pdf->filename.empty()) {
+        return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                     .message = "A PDF part requires bytes and a filename."});
+      }
+      encoded = to_json(InputFilePart{
+          .filename = pdf->filename,
+          .file_data = cail::detail::image_data_url("application/pdf", pdf->bytes),
+      });
     } else {
       const auto& image = std::get<ImagePart>(part);
       if (image.mime_type.empty() || image.bytes.empty()) {

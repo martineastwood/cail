@@ -23,6 +23,7 @@ export default defineConfig({
 				{ label: 'Tools', slug: 'guides/tools' },
 				{ label: 'Agent', slug: 'guides/agent' },
 				{ label: 'Memory', slug: 'guides/memory' },
+				{ label: 'Files, images, and PDFs', slug: 'guides/loaders' },
 				{ label: 'Streaming', slug: 'guides/streaming' },
 				{ label: 'Embeddings', slug: 'guides/embeddings' },
 				{ label: 'Providers', slug: 'guides/providers' },

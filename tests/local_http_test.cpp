@@ -15,6 +15,10 @@ struct Answer {
   std::string answer;
 };
 
+struct CountInput {
+  std::string query;
+};
+
 namespace {
 
 int failures{};
@@ -117,6 +121,100 @@ int main(int argc, char** argv) {
   const auto cancelled_async = cancelled_response.get();
   check(!cancelled_async && cancelled_async.error().code == cail::ErrorCode::cancelled,
         "async generation reports cancellation");
+  const std::vector<cail::LanguageModel> async_providers{
+      cail::create_openai({.api_key = "test-key", .base_url = base + "/async"})("test-model"),
+      cail::create_anthropic({.api_key = "test-key", .base_url = base + "/async/anthropic"})(
+          "test-model"),
+      cail::create_gemini({.api_key = "test-key", .base_url = base + "/async/gemini"})(
+          "test-model"),
+  };
+  std::vector<std::future<cail::Result<cail::GenerationResponse>>> provider_results;
+  const auto providers_began = std::chrono::steady_clock::now();
+  for (const auto& model : async_providers) {
+    auto completion = std::make_shared<std::promise<cail::Result<cail::GenerationResponse>>>();
+    provider_results.push_back(completion->get_future());
+    check(model
+              .generate_async(
+                  prompt(),
+                  [completion](auto response) { completion->set_value(std::move(response)); })
+              .has_value(),
+          "native async provider starts over HTTP");
+  }
+  check(std::chrono::steady_clock::now() - providers_began < std::chrono::milliseconds{800},
+        "native providers return before delayed responses");
+  for (auto& response : provider_results)
+    check(response.wait_for(std::chrono::seconds{5}) == std::future_status::ready &&
+              response.get().has_value(),
+          "native async providers decode live HTTP responses");
+  for (const auto& model : async_providers) {
+    std::promise<cail::Result<cail::GenerationResponse>> completion;
+    auto result = completion.get_future();
+    std::stop_source cancel;
+    check(model
+              .generate_async(
+                  prompt(), [&](auto response) { completion.set_value(std::move(response)); },
+                  cancel.get_token())
+              .has_value(),
+          "native cancellable HTTP request starts");
+    cancel.request_stop();
+    check(result.wait_for(std::chrono::seconds{2}) == std::future_status::ready,
+          "native HTTP cancellation completes promptly");
+    const auto response = result.get();
+    check(!response && response.error().code == cail::ErrorCode::cancelled,
+          "native async providers report HTTP cancellation");
+  }
+  const std::vector<cail::EmbeddingModel> async_embeddings{
+      cail::create_openai({.api_key = "test-key", .base_url = base + "/async"})
+          .embedding_model("test-model"),
+      cail::create_gemini({.api_key = "test-key", .base_url = base + "/async/gemini"})
+          .embedding_model("test-model"),
+  };
+  for (const auto& model : async_embeddings) {
+    std::promise<cail::Result<cail::Embedding>> completion;
+    auto result = completion.get_future();
+    check(model.supports_async() &&
+              model
+                  .embed_async("one",
+                               [&](auto response) { completion.set_value(std::move(response)); })
+                  .has_value(),
+          "native embedding provider starts async HTTP request");
+    check(result.wait_for(std::chrono::milliseconds{50}) == std::future_status::timeout,
+          "async embeddings return before delayed HTTP response");
+    check(result.get().has_value(), "async embedding provider decodes live HTTP response");
+    std::stop_source cancel;
+    std::promise<cail::Result<cail::EmbeddingBatch>> cancelled;
+    auto cancelled_result = cancelled.get_future();
+    check(model
+              .embed_many_async(
+                  {"one", "two"}, [&](auto response) { cancelled.set_value(std::move(response)); },
+                  cancel.get_token())
+              .has_value(),
+          "cancellable embedding HTTP request starts");
+    cancel.request_stop();
+    check(cancelled_result.wait_for(std::chrono::seconds{2}) == std::future_status::ready,
+          "async embedding HTTP cancellation completes promptly");
+    const auto response = cancelled_result.get();
+    check(!response && response.error().code == cail::ErrorCode::cancelled,
+          "embedding providers report HTTP cancellation");
+  }
+  auto count =
+      cail::tool<CountInput, int>("count", "Count characters", [](const CountInput& input) {
+        return static_cast<int>(input.query.size());
+      });
+  std::promise<cail::Result<cail::GenerationResponse>> loop_completion;
+  auto loop_result = loop_completion.get_future();
+  check(cail::generate_text_async(
+            {.model = cail::create_local({.endpoint = base + "/async/tool-chat"})("test-model"),
+             .prompt = "count abc",
+             .tools = {count}},
+            [&](auto response) { loop_completion.set_value(std::move(response)); })
+            .has_value(),
+        "async tool loop starts over live HTTP");
+  const auto loop_response = loop_result.get();
+  check(loop_response && loop_response->text == "Done" && loop_response->tool_results.size() == 1 &&
+            loop_response->tool_results.front().output == "3",
+        "async tool loop executes tools over live HTTP");
+
   const auto keyed_local =
       cail::create_local({.api_key = "key", .endpoint = base + "/local/chat"})("test-model")
           .generate(prompt());

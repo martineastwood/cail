@@ -4,6 +4,7 @@
 #include <cail/memory.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -341,6 +342,242 @@ void test_agent_memory_stream() {
         "streamed turns replay in the next call");
 }
 
+[[nodiscard]] cail::Message multimodal_message() {
+  std::string binary;
+  for (int byte = 0; byte < 256; ++byte) {
+    binary.push_back(static_cast<char>(byte));
+  }
+  return cail::Message{
+      .content = {cail::TextPart{.text = "Compare the image and report",
+                                 .provider_options = {{"text", "kept"}}},
+                  cail::ImagePart{.bytes = binary,
+                                  .mime_type = "image/png",
+                                  .provider_options = {{"image", "kept"}}},
+                  cail::PdfPart{.bytes = "%PDF-1.7\n" + binary,
+                                .filename = "report.pdf",
+                                .provider_options = {{"pdf", "kept"}}}},
+      .provider_options = {{"message", "kept"}},
+  };
+}
+
+void check_multimodal_message(const cail::Message& actual, const cail::Message& expected) {
+  const auto actual_json = cail::to_json(actual);
+  const auto expected_json = cail::to_json(expected);
+  check(actual_json && expected_json && *actual_json == *expected_json,
+        "multimodal messages preserve binary bytes, filenames, MIME types, order, and metadata");
+}
+
+void test_multimodal_agent_memory() {
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("cail_multimodal_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  for (bool file_memory : {false, true}) {
+    for (int mode = 0; mode < 3; ++mode) {
+      std::filesystem::remove_all(directory);
+      std::shared_ptr<cail::ConversationMemory> memory;
+      if (file_memory) {
+        memory = std::make_shared<cail::FileConversationMemory>(directory);
+      } else {
+        memory = std::make_shared<cail::InMemoryConversationMemory>();
+      }
+      auto client = std::make_shared<ScriptedClient>(std::vector<cail::GenerationResponse>{
+          cail::GenerationResponse{
+              .tool_calls = {{.id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}}},
+          cail::GenerationResponse{.text = "counted"},
+          cail::GenerationResponse{.text = "follow-up"},
+          cail::GenerationResponse{.text = "trimmed"},
+          cail::GenerationResponse{.text = "separate"},
+      });
+      auto model = cail::LanguageModel(
+          [client](const cail::GenerationRequest& request, const std::stop_token& stop) {
+            return client->generate(request, stop);
+          },
+          [client](const cail::GenerationRequest& request, const cail::StreamHandler& handler,
+                   const std::stop_token& stop) { return client->stream(request, handler, stop); },
+          {},
+          [client](const cail::GenerationRequest& request,
+                   const cail::LanguageModel::GenerationCompletion& complete,
+                   const std::stop_token& stop) -> cail::Result<void> {
+            complete(client->generate(request, stop));
+            return {};
+          });
+      auto count = cail::tool<ToolInput, ToolOutput>("count", "Count", [](const ToolInput& input) {
+        return ToolOutput{.count = static_cast<int>(input.query.size())};
+      });
+      cail::Agent agent({.model = model,
+                         .instructions = "system",
+                         .tools = {count},
+                         .memory = memory,
+                         .conversation_id = "conversation"});
+      const auto message = multimodal_message();
+      cail::Result<cail::GenerationResponse> first;
+      std::string deltas;
+      if (mode == 0) {
+        first = agent.generate(message);
+      } else if (mode == 1) {
+        first = agent.stream(message, [&](const cail::StreamEvent& event) {
+          if (const auto* text = std::get_if<cail::TextDelta>(&event)) {
+            deltas += text->text;
+          }
+        });
+      } else {
+        check(agent.generate_async(message, [&](auto result) { first = std::move(result); })
+                  .has_value(),
+              "multimodal async agent starts");
+      }
+      check(first && first->text == "counted" && first->tool_results.size() == 1,
+            "multimodal agent inputs run the tool loop in all execution modes");
+      check(mode != 1 || deltas == "counted", "multimodal streaming forwards output events");
+      check(client->requests.size() == 2, "multimodal request makes a tool follow-up");
+      if (client->requests.size() != 2) {
+        continue;
+      }
+      check_multimodal_message(client->requests[0].messages[1], message);
+      check_multimodal_message(client->requests[1].messages[1], message);
+      if (file_memory) {
+        memory = std::make_shared<cail::FileConversationMemory>(directory);
+        std::ifstream file(directory / "conversation.json", std::ios::binary);
+        const std::string json{std::istreambuf_iterator<char>{file},
+                               std::istreambuf_iterator<char>{}};
+        check(json.find(cail::detail::base64_encode(
+                  std::get<cail::ImagePart>(message.content[1]).bytes)) != std::string::npos,
+              "file memory encodes binary attachments as base64");
+      }
+      auto stored = memory->load("conversation");
+      check(stored && stored->size() == 4,
+            "memory stores the attachment input once and every tool round");
+      if (!stored || stored->empty()) {
+        continue;
+      }
+      check_multimodal_message(stored->front(), message);
+      cail::Agent resumed({.model = model,
+                           .instructions = "system",
+                           .tools = {count},
+                           .memory = memory,
+                           .conversation_id = "conversation"});
+      check(resumed.generate("What about the report?").has_value(),
+            "a text follow-up recalls attachments");
+      check(client->requests.back().messages.size() == 6,
+            "follow-up replays the full multimodal turn");
+      check_multimodal_message(client->requests.back().messages[1], message);
+      check(resumed.generate("Continue", {.keep_last_messages = 2}).has_value(),
+            "multimodal history can be trimmed");
+      const auto& trimmed = client->requests.back().messages;
+      check(trimmed.size() == 4 &&
+                std::ranges::all_of(trimmed,
+                                    [](const cail::Message& item) {
+                                      return std::ranges::all_of(
+                                          item.content, [](const cail::ContentPart& part) {
+                                            return std::holds_alternative<cail::TextPart>(part);
+                                          });
+                                    }),
+            "trimming drops attachments with their original user message");
+      check(memory->load("conversation")->size() == 8,
+            "trimming preserves complete stored multimodal history");
+      check(resumed.generate(message, {.conversation_id = "other"}).has_value(),
+            "multimodal inputs support conversation overrides");
+      check(client->requests.back().messages.size() == 2 && memory->load("other")->size() == 2,
+            "attachments remain isolated by conversation id");
+      check(memory->clear("conversation").has_value() && memory->load("conversation")->empty(),
+            "clearing removes multimodal history");
+    }
+  }
+  std::filesystem::remove_all(directory);
+}
+
+void test_multimodal_input_validation() {
+  int calls = 0;
+  auto model = cail::LanguageModel(
+      [&](const cail::GenerationRequest&,
+          const std::stop_token&) -> cail::Result<cail::GenerationResponse> {
+        ++calls;
+        return std::unexpected(cail::Error{.code = cail::ErrorCode::provider_response});
+      },
+      [&](const cail::GenerationRequest&, const cail::StreamHandler&,
+          const std::stop_token&) -> cail::Result<cail::GenerationResponse> {
+        ++calls;
+        return std::unexpected(cail::Error{.code = cail::ErrorCode::provider_response});
+      },
+      {},
+      [&](const cail::GenerationRequest&, const cail::LanguageModel::GenerationCompletion& complete,
+          const std::stop_token&) -> cail::Result<void> {
+        ++calls;
+        complete(std::unexpected(cail::Error{.code = cail::ErrorCode::provider_response}));
+        return {};
+      });
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  cail::Agent agent({.model = model, .memory = memory, .conversation_id = "conversation"});
+  const auto ignore = [](const cail::StreamEvent&) {};
+  for (const auto role : {cail::MessageRole::system, cail::MessageRole::developer,
+                          cail::MessageRole::assistant, cail::MessageRole::tool}) {
+    auto message = multimodal_message();
+    message.role = role;
+    int callbacks = 0;
+    check(!agent.generate(message) && !agent.stream(message, ignore) &&
+              !agent.generate_async(message, [&](auto) { ++callbacks; }) && callbacks == 0,
+          "memory input rejects non-user roles in all execution modes");
+  }
+  auto message = multimodal_message();
+  message.tool_call_id = "call";
+  check(!agent.generate(message), "a user message cannot contain a tool result ID");
+  message.tool_call_id.clear();
+  message.tool_calls = {{.id = "call", .name = "tool", .arguments = "{}"}};
+  check(!agent.generate(message), "a user message cannot contain tool calls");
+  check(!agent.generate(cail::Message{}), "empty user messages are rejected");
+  check(calls == 0, "invalid memory input never reaches the model");
+  check(!agent.generate(multimodal_message()) && !agent.stream(multimodal_message(), ignore),
+        "multimodal model failures propagate");
+  bool callback = false;
+  check(agent.generate_async(multimodal_message(),
+                             [&](auto result) {
+                               callback = true;
+                               check(!result, "async multimodal model failures propagate");
+                             })
+                .has_value() &&
+            callback,
+        "a started async multimodal request reports failure through completion");
+  check(memory->load("conversation")->empty(), "failed multimodal calls store no attachments");
+  std::stop_source stop;
+  stop.request_stop();
+  const auto cancelled = agent.generate(multimodal_message(), {.stop = stop.get_token()});
+  check(!cancelled && cancelled.error().code == cail::ErrorCode::cancelled && calls == 3,
+        "cancelled multimodal input stores nothing and does not reach the model");
+}
+
+void test_attachment_base64() {
+  for (const std::string& bytes : {std::string{}, std::string{"a"}, std::string{"ab"},
+                                   std::string{"abc"}, std::string{"\0\xff", 2}}) {
+    const auto encoded = cail::detail::base64_encode(bytes);
+    const auto decoded = cail::detail::base64_decode(encoded);
+    check(decoded && *decoded == bytes, "base64 decoding preserves binary and padded payloads");
+  }
+  for (const auto invalid : {"a", "!!!!", "=AAA", "AA=A", "AA==AAAA", "AB==", "AAB="}) {
+    check(!cail::detail::base64_decode(invalid),
+          "invalid or noncanonical attachment base64 is rejected");
+  }
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("cail_bad_attachment_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directory(directory);
+  {
+    std::ofstream file(directory / "bad.json");
+    file
+        << R"({"version":2,"messages":[{"role":"user","content":[{"bytes":"!!!!","mime_type":"image/png","provider_options":{}}],"tool_call_id":"","tool_calls":[],"provider_options":{}}]})";
+  }
+  cail::FileConversationMemory memory(directory);
+  const auto invalid = memory.load("bad");
+  check(!invalid && invalid.error().code == cail::ErrorCode::memory,
+        "corrupted encoded attachments return a memory error");
+  {
+    std::ofstream file(directory / "old.json");
+    file << R"({"version":1,"messages":[]})";
+  }
+  check(!memory.load("old"), "old conversation formats are rejected");
+  std::filesystem::remove_all(directory);
+}
+
 } // namespace test
 
 int main() {
@@ -354,5 +591,8 @@ int main() {
   test::test_agent_memory_explicit_requests_bypass_memory();
   test::test_agent_memory_keep_last_messages();
   test::test_agent_memory_stream();
+  test::test_multimodal_agent_memory();
+  test::test_multimodal_input_validation();
+  test::test_attachment_base64();
   return test::failures == 0 ? 0 : 1;
 }

@@ -64,7 +64,13 @@ struct ImagePart {
   ProviderOptions provider_options;
 };
 
-using ContentPart = std::variant<TextPart, ImagePart>;
+struct PdfPart {
+  std::string bytes;
+  std::string filename;
+  ProviderOptions provider_options;
+};
+
+using ContentPart = std::variant<TextPart, ImagePart, PdfPart>;
 
 template <typename Arguments>
 [[nodiscard]] ToolDefinition make_tool(std::string name, std::string description) {
@@ -110,6 +116,25 @@ namespace detail {
   return GenerationRequest{
       .messages = {Message{.content = {TextPart{.text = std::string{prompt}}}}},
   };
+}
+
+[[nodiscard]] inline Result<void> validate_pdf_parts(const GenerationRequest& request,
+                                                     bool supported = true) {
+  for (const auto& message : request.messages) {
+    for (const auto& part : message.content) {
+      if (const auto* pdf = std::get_if<PdfPart>(&part)) {
+        if (!supported || message.role != MessageRole::user || pdf->bytes.empty() ||
+            pdf->filename.empty()) {
+          return std::unexpected(Error{
+              .code = ErrorCode::invalid_configuration,
+              .message = supported ? "PDF parts require user content, bytes, and a filename."
+                                   : "This adapter does not support PDF input.",
+          });
+        }
+      }
+    }
+  }
+  return {};
 }
 
 [[nodiscard]] inline Result<void> validate_max_output_tokens(const GenerationRequest& request) {

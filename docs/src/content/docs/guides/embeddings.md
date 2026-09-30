@@ -27,6 +27,54 @@ Each vector includes the returned model ID and dimension count. Batch results fo
 input order even if the provider returns indexed vectors out of order.
 `batch->input_tokens` is present when the provider reports usage.
 
+## Embed without blocking
+
+Use `embed_async` for one input or `embed_many_async` for a batch. Set your
+provider's API key, then start a request and handle its result in a callback:
+
+```cpp
+std::promise<void> finished;
+auto done = finished.get_future();
+std::stop_source stop;
+auto model = cail::openai.embedding_model("text-embedding-3-small");
+
+auto started = model.embed_many_async(
+    {"A red apple", "A green pear"},
+    [&finished](cail::Result<cail::EmbeddingBatch> result) {
+        if (result) std::cout << result->embeddings.size() << " vectors\n";
+        else std::cerr << result.error().message << '\n';
+        finished.set_value();
+    },
+    stop.get_token());
+if (!started) {
+    std::cerr << started.error().message << '\n';
+    return 1;
+}
+done.wait();
+```
+
+Include `<future>`, `<iostream>`, and `<stop_token>` alongside your CAIL
+headers. This example waits to keep the process alive; your application can
+continue other work after the call starts.
+
+`embed_async` completes with `Result<Embedding>`. `embed_many_async` completes
+with `Result<EmbeddingBatch>`, preserving input order. Immediate validation
+errors are returned without invoking the callback. Once started, the operation
+completes its callback once, including on cancellation or provider errors.
+
+Both embedding adapters, OpenAI-compatible and Gemini, support async requests.
+For custom embedding models, check `supports_async()` first. The request keeps
+the built-in model alive until completion; reference captures in callbacks must
+remain valid. Callbacks may run on a CAIL I/O thread or before the call returns.
+
+Call `stop.request_stop()` to cancel an active request or retry delay. Blocking
+calls also accept a token: `embed(text, token)` and `embed_many(texts, token)`.
+
+For a custom `EmbeddingModel`, the embedding function takes
+`(const std::vector<std::string>& inputs, std::stop_token stop)`. Pass an optional
+second function with `(std::vector<std::string> inputs, BatchCompletion complete,
+std::stop_token stop)` to support async requests. Honor the token in both functions.
+
 ## Shorter vectors
 
 The second argument is optional. Pass a positive dimension count when you want shorter

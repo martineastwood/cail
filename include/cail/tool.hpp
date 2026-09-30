@@ -3,6 +3,7 @@
 #include <cail/error.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
+#include <cail/language_model.hpp>
 
 #include <algorithm>
 #include <concepts>
@@ -11,6 +12,8 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -23,6 +26,7 @@ namespace cail {
 struct ToolContext {
   std::string call_id;
   std::size_t round{};
+  std::stop_token stop;
 };
 
 class Tool {
@@ -147,73 +151,56 @@ template <typename Input, typename Output, typename Handler>
 
 namespace detail {
 
-template <typename Send>
-[[nodiscard]] Result<GenerationResponse> run_tool_loop(GenerationRequest request,
-                                                       const std::vector<Tool>& tools,
-                                                       ToolLoopOptions options, Send&& send) {
-  request.tools.clear();
-  request.tools.reserve(tools.size());
-  for (const auto& tool : tools) {
-    request.tools.push_back(tool.definition());
+class ToolLoop {
+public:
+  ToolLoop(GenerationRequest initial, std::vector<Tool> registered, ToolLoopOptions settings)
+      : request(std::move(initial)), options(std::move(settings)), tools(std::move(registered)) {
+    request.tools.clear();
+    for (const auto& tool : tools)
+      request.tools.push_back(tool.definition());
   }
 
-  const auto send_step = [&](const GenerationRequest& step) -> Result<GenerationResponse> {
-    auto response = send(step);
-    if (auto middleware = detail::run_after_step(step, response); !middleware) {
+  [[nodiscard]] Result<bool> accept(Result<GenerationResponse> response) {
+    if (auto middleware = run_after_step(request, response); !middleware)
       return std::unexpected(middleware.error());
-    }
-    return response;
-  };
-
-  if (options.stop.stop_requested()) {
-    return std::unexpected(generation_cancelled_error());
-  }
-  auto response = send_step(request);
-  if (!response) {
-    return std::unexpected(response.error());
-  }
-
-  std::vector<ToolResult> tool_results;
-  std::vector<Message> turn;
-  auto assistant_message = [](const GenerationResponse& response) {
-    return Message{
-        .role = MessageRole::assistant,
-        .content = response.text.empty()
-                       ? std::vector<ContentPart>{}
-                       : std::vector<ContentPart>{TextPart{.text = response.text}},
-        .tool_calls = response.tool_calls,
-        .provider_options = response.provider_options,
-    };
-  };
-  std::size_t round = 0;
-  while (true) {
-    if (options.stop.stop_requested()) {
+    if (options.stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
-    }
+    if (!response)
+      return std::unexpected(response.error());
+    bool stopped = false;
     if (options.stop_when) {
       try {
-        if (options.stop_when(*response, {.step = request.step})) {
-          break;
-        }
+        stopped = options.stop_when(*response, {.step = request.step});
       } catch (const std::exception& error) {
-        return std::unexpected(Error{
-            .code = ErrorCode::invalid_configuration,
-            .message = std::string{"The tool-loop stop condition failed: "} + error.what(),
-        });
+        return std::unexpected(
+            Error{.code = ErrorCode::invalid_configuration,
+                  .message = std::string{"The tool-loop stop condition failed: "} + error.what()});
       } catch (...) {
         return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                      .message = "The tool-loop stop condition failed."});
       }
     }
-    if (response->tool_calls.empty()) {
-      break;
+    if (options.stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto assistant = Message{
+        .role = MessageRole::assistant,
+        .content = response->text.empty()
+                       ? std::vector<ContentPart>{}
+                       : std::vector<ContentPart>{TextPart{.text = response->text}},
+        .tool_calls = response->tool_calls,
+        .provider_options = response->provider_options,
+    };
+    if (stopped || response->tool_calls.empty()) {
+      turn.push_back(std::move(assistant));
+      response->turn = std::move(turn);
+      response->tool_results = std::move(tool_results);
+      result = std::move(*response);
+      return true;
     }
-    if (round >= options.max_rounds) {
-      return std::unexpected(Error{
-          .code = ErrorCode::tool_loop_limit,
-          .message = "The model exceeded the configured tool-call round limit.",
-      });
-    }
+    if (round >= options.max_rounds)
+      return std::unexpected(
+          Error{.code = ErrorCode::tool_loop_limit,
+                .message = "The model exceeded the configured tool-call round limit."});
     GenerationRequest follow_up{
         .tools = request.tools,
         .structured_output = request.structured_output,
@@ -225,54 +212,119 @@ template <typename Send>
         .middleware = request.middleware,
         .step = round + 1,
     };
-    Message assistant = assistant_message(*response);
     if (!response->continuation_token) {
       follow_up.messages = request.messages;
       follow_up.messages.push_back(assistant);
     }
     turn.push_back(std::move(assistant));
     for (const auto& call : response->tool_calls) {
+      if (options.stop.stop_requested())
+        return std::unexpected(generation_cancelled_error());
       const auto tool = std::ranges::find_if(tools, [&call](const auto& candidate) {
         return candidate.definition().name == call.name;
       });
-      if (tool == tools.end()) {
-        return std::unexpected(Error{
-            .code = ErrorCode::tool_not_found,
-            .message = "The model requested an unregistered tool: " + call.name,
-        });
-      }
-
-      auto output = tool->execute(call, ToolContext{.call_id = call.id, .round = round});
-      if (!output) {
+      if (tool == tools.end())
+        return std::unexpected(
+            Error{.code = ErrorCode::tool_not_found,
+                  .message = "The model requested an unregistered tool: " + call.name});
+      auto output = tool->execute(call, {.call_id = call.id, .round = round, .stop = options.stop});
+      if (options.stop.stop_requested())
+        return std::unexpected(generation_cancelled_error());
+      if (!output)
         return std::unexpected(output.error());
-      }
-      tool_results.push_back(ToolResult{
-          .call_id = call.id,
-          .name = call.name,
-          .output = *output,
-      });
-      Message tool_message{
-          .role = MessageRole::tool,
-          .content = {TextPart{.text = std::move(*output)}},
-          .tool_call_id = call.id,
-      };
+      tool_results.push_back({.call_id = call.id, .name = call.name, .output = *output});
+      Message tool_message{.role = MessageRole::tool,
+                           .content = {TextPart{.text = std::move(*output)}},
+                           .tool_call_id = call.id};
       follow_up.messages.push_back(tool_message);
       turn.push_back(std::move(tool_message));
     }
-
     ++round;
-    request = follow_up;
-    response = send_step(follow_up);
-    if (!response) {
-      return std::unexpected(response.error());
-    }
+    request = std::move(follow_up);
+    return false;
   }
 
-  turn.push_back(assistant_message(*response));
-  response->tool_results = std::move(tool_results);
-  response->turn = std::move(turn);
-  return response;
+  GenerationRequest request;
+  ToolLoopOptions options;
+  GenerationResponse result;
+
+private:
+  std::vector<Tool> tools;
+  std::vector<ToolResult> tool_results;
+  std::vector<Message> turn;
+  std::size_t round{};
+};
+
+template <typename Send>
+[[nodiscard]] Result<GenerationResponse> run_tool_loop(GenerationRequest request,
+                                                       const std::vector<Tool>& tools,
+                                                       ToolLoopOptions options, Send&& send) {
+  ToolLoop loop(std::move(request), tools, std::move(options));
+  while (true) {
+    if (loop.options.stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto finished = loop.accept(send(loop.request));
+    if (!finished)
+      return std::unexpected(finished.error());
+    if (*finished)
+      return std::move(loop.result);
+  }
 }
+
+class AsyncToolLoop : public std::enable_shared_from_this<AsyncToolLoop> {
+public:
+  AsyncToolLoop(LanguageModel model, GenerationRequest request, std::vector<Tool> tools,
+                ToolLoopOptions options, LanguageModel::GenerationCompletion complete)
+      : loop_(std::move(request), std::move(tools), std::move(options)), model_(std::move(model)),
+        complete_(std::move(complete)) {}
+
+  [[nodiscard]] Result<void> start() {
+    return model_.generate_async(
+        loop_.request,
+        [self = shared_from_this()](Result<GenerationResponse> response) {
+          self->accept(std::move(response));
+        },
+        loop_.options.stop);
+  }
+
+private:
+  // Inline completions queue the next result instead of recursively growing the stack.
+  void accept(Result<GenerationResponse> response) {
+    std::unique_lock lock(mutex_);
+    pending_ = std::move(response);
+    if (running_)
+      return;
+    running_ = true;
+    while (pending_) {
+      auto next = std::move(*pending_);
+      pending_.reset();
+      lock.unlock();
+      auto finished = loop_.accept(std::move(next));
+      if (!finished) {
+        complete_(std::unexpected(finished.error()));
+        return;
+      }
+      if (*finished) {
+        complete_(std::move(loop_.result));
+        return;
+      }
+      auto started = start();
+      if (!started) {
+        complete_(std::unexpected(started.error()));
+        return;
+      }
+      lock.lock();
+    }
+    running_ = false;
+  }
+
+  ToolLoop loop_;
+  LanguageModel model_;
+  LanguageModel::GenerationCompletion complete_;
+  std::mutex mutex_;
+  bool running_{};
+  std::optional<Result<GenerationResponse>> pending_;
+};
 
 } // namespace detail
 
@@ -292,6 +344,20 @@ stream_tool_loop(const Client& client, GenerationRequest request, const std::vec
   return detail::run_tool_loop(
       std::move(request), tools, options,
       [&](const GenerationRequest& step) { return client.stream(step, on_event, options.stop); });
+}
+
+[[nodiscard]] inline Result<void>
+run_tool_loop_async(LanguageModel model, GenerationRequest request, std::vector<Tool> tools,
+                    LanguageModel::GenerationCompletion complete, ToolLoopOptions options = {}) {
+  if (!complete)
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message = "Async tool loops require a completion handler."});
+  if (options.stop.stop_requested())
+    return std::unexpected(generation_cancelled_error());
+  return std::make_shared<detail::AsyncToolLoop>(std::move(model), std::move(request),
+                                                 std::move(tools), std::move(options),
+                                                 std::move(complete))
+      ->start();
 }
 
 } // namespace cail

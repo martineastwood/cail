@@ -84,6 +84,17 @@ template <typename Client>
         return client->stream(request, handler, stop);
       },
       capabilities,
+      [client, has_api_key](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+                            std::stop_token stop) -> Result<void> {
+        if (auto valid = validate_request(request, has_api_key); !valid)
+          return std::unexpected(valid.error());
+        return client->generate_async(
+            std::move(request),
+            [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+              complete(std::move(result));
+            },
+            stop);
+      },
   };
 }
 
@@ -140,6 +151,7 @@ public:
       return detail::opencode::language_model_from(std::move(client), !key.empty(),
                                                    AdapterCapabilities{
                                                        .image_input = true,
+                                                       .pdf_input = true,
                                                        .tools = true,
                                                        .structured_output = true,
                                                        .reasoning = true,
@@ -159,6 +171,7 @@ public:
       return detail::opencode::language_model_from(std::move(client), !key.empty(),
                                                    AdapterCapabilities{
                                                        .image_input = true,
+                                                       .pdf_input = true,
                                                        .tools = true,
                                                        .structured_output = true,
                                                        .reasoning = true,

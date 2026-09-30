@@ -2,6 +2,7 @@
 
 #include <cail/agent.hpp>
 #include <cail/field.hpp>
+#include <cail/generate.hpp>
 #include <cail/json.hpp>
 #include <cail/schema.hpp>
 #include <cail/tool.hpp>
@@ -222,6 +223,140 @@ void test_streaming_tool_loop_and_stop_conditions() {
         "streaming tool loop honors cancellation before the first step");
 }
 
+void test_text_generation_options() {
+  for (bool streaming : {false, true}) {
+    auto client = std::make_shared<ScriptedClient>(std::vector<cail::GenerationResponse>{
+        cail::GenerationResponse{
+            .text = "checking",
+            .tool_calls = {cail::ToolCall{
+                .id = "call-1", .name = "count", .arguments = R"({"query":"abc"})"}},
+        },
+        cail::GenerationResponse{.text = "counted"},
+    });
+    std::stop_source stop;
+    auto model = cail::LanguageModel(
+        [&, client](const cail::GenerationRequest& request, std::stop_token token) {
+          check(token == stop.get_token(), "generate_text forwards cancellation token");
+          return client->generate(request, token);
+        },
+        [&, client](const cail::GenerationRequest& request, const cail::StreamHandler& handler,
+                    std::stop_token token) {
+          check(token == stop.get_token(), "stream_text forwards cancellation token");
+          return client->stream(request, handler, token);
+        });
+    std::vector<std::size_t> steps;
+    cail::GenerateTextOptions options{
+        .model = model,
+        .system = "Be concise.",
+        .prompt = "count abc",
+        .messages = {cail::Message{
+            .content = {cail::ImagePart{.bytes = "image bytes", .mime_type = "image/png"}}}},
+        .tools = {cail::tool<ToolInput, ToolOutput>("count", "Count characters",
+                                                    [](const ToolInput& input) {
+                                                      return ToolOutput{.count = static_cast<int>(
+                                                                            input.query.size())};
+                                                    })},
+        .structured_output = cail::StructuredOutput{.schema = cail::schema<Address>()},
+        .tool_loop = {.stop = stop.get_token()},
+        .session_id = "session",
+        .max_output_tokens = 123,
+        .stream_usage = false,
+        .provider_options = {{"custom", "value"}},
+        .middleware = {cail::GenerationMiddleware{
+            .after_step =
+                [&](const cail::Result<cail::GenerationResponse>& response,
+                    const cail::MiddlewareContext& context) {
+                  check(response.has_value(), "text middleware receives the result");
+                  steps.push_back(context.step);
+                }}},
+    };
+    std::string text;
+    const auto result =
+        streaming
+            ? cail::stream_text(options,
+                                [&](const cail::StreamEvent& event) {
+                                  if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+                                    text += delta->text;
+                                })
+            : cail::generate_text(options);
+    check(result && result->text == "counted" && result->tool_results.size() == 1 &&
+              result->tool_results.front().output == R"({"count":3})",
+          "both text APIs execute tools and return the final result");
+    check(!streaming || text == "checkingcounted", "stream_text forwards every model step");
+    check(steps == std::vector<std::size_t>{0, 1}, "both text APIs run step middleware");
+    check(client->requests.size() == 2, "both text APIs make a tool follow-up request");
+    if (client->requests.size() != 2)
+      continue;
+    const auto& first = client->requests.front();
+    check(first.messages.size() == 3 && first.messages.front().role == cail::MessageRole::system &&
+              std::get<cail::TextPart>(first.messages.front().content.front()).text ==
+                  "Be concise." &&
+              std::holds_alternative<cail::ImagePart>(first.messages[1].content.front()) &&
+              std::get<cail::TextPart>(first.messages.back().content.front()).text == "count abc",
+          "both text APIs prepend system, preserve history, and append prompt");
+    for (const auto& request : client->requests) {
+      check(request.session_id == "session" && request.max_output_tokens == 123 &&
+                request.stream_usage == false && request.structured_output &&
+                request.provider_options.contains("custom") && request.tools.size() == 1,
+            "both text APIs preserve request options through tool follow-ups");
+    }
+  }
+}
+
+void test_stream_text_validation_and_cancellation() {
+  int calls = 0;
+  auto model = cail::LanguageModel(
+      [&](const cail::GenerationRequest&, std::stop_token) {
+        ++calls;
+        return cail::GenerationResponse{.text = "done"};
+      },
+      [&](const cail::GenerationRequest&, const cail::StreamHandler& handler, std::stop_token) {
+        ++calls;
+        handler(cail::ReasoningDelta{.text = "thinking"});
+        handler(cail::TextDelta{.text = "done"});
+        return cail::GenerationResponse{.text = "done"};
+      });
+  const auto ignore = [](const cail::StreamEvent&) {};
+  const auto missing = cail::stream_text({.model = model, .system = "system only"}, ignore);
+  check(!missing && missing.error().code == cail::ErrorCode::invalid_configuration,
+        "stream_text requires prompt or messages");
+  const auto missing_generate = cail::generate_text({.model = model, .system = "system only"});
+  check(!missing_generate &&
+            missing_generate.error().code == cail::ErrorCode::invalid_configuration,
+        "generate_text shares input validation");
+  const auto no_handler = cail::stream_text({.model = model, .prompt = "hello"}, {});
+  check(!no_handler && no_handler.error().code == cail::ErrorCode::invalid_configuration,
+        "stream_text rejects an empty handler");
+  std::stop_source stop;
+  stop.request_stop();
+  cail::GenerateTextOptions options{
+      .model = model, .prompt = "hello", .tool_loop = {.stop = stop.get_token()}};
+  const auto cancelled_stream = cail::stream_text(options, ignore);
+  const auto cancelled_generate = cail::generate_text(options);
+  check(!cancelled_stream && cancelled_stream.error().code == cail::ErrorCode::cancelled &&
+            !cancelled_generate && cancelled_generate.error().code == cail::ErrorCode::cancelled &&
+            calls == 0,
+        "both text APIs stop before contacting the model when cancelled");
+  std::stop_source during_stream;
+  std::size_t events = 0;
+  const auto cancelled = cail::stream_text(
+      {.model = model, .prompt = "hello", .tool_loop = {.stop = during_stream.get_token()}},
+      [&](const cail::StreamEvent&) {
+        ++events;
+        during_stream.request_stop();
+      });
+  check(!cancelled && cancelled.error().code == cail::ErrorCode::cancelled && events == 2,
+        "stream_text forwards typed events and observes cancellation from the callback");
+  const auto unsupported = cail::stream_text(
+      {.model = cail::LanguageModel([](const cail::GenerationRequest&, std::stop_token) {
+         return cail::GenerationResponse{};
+       }),
+       .prompt = "hello"},
+      ignore);
+  check(!unsupported && unsupported.error().code == cail::ErrorCode::invalid_configuration,
+        "stream_text reports models without streaming support");
+}
+
 void test_transport_retries() {
   class FlakyTransport final : public cail::HttpTransport {
   public:
@@ -372,6 +507,8 @@ int main() {
   test::test_tool_loop();
   test::test_agent();
   test::test_streaming_tool_loop_and_stop_conditions();
+  test::test_text_generation_options();
+  test::test_stream_text_validation_and_cancellation();
   test::test_transport_retries();
   test::test_async_transport_retries();
   return test::failures == 0 ? 0 : 1;

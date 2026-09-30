@@ -23,6 +23,7 @@ enum class ErrorCode {
   tool_not_found,
   tool_loop_limit,
   memory,
+  file,
 };
 
 struct Error {

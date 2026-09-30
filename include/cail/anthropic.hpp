@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cail/detail/async_http.hpp>
+
 #include <cail/detail/base64.hpp>
 #include <cail/detail/encode_json.hpp>
 #include <cail/detail/env.hpp>
@@ -129,6 +131,9 @@ struct StreamBody {
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request,
                                                 const Config& config, bool streaming) {
+  if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
+    return std::unexpected(valid.error());
+  }
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -250,6 +255,12 @@ struct StreamBody {
           if (text->text.empty())
             continue;
           added = append_json(item.content, TextBlock{.text = text->text});
+        } else if (const auto* pdf = std::get_if<cail::PdfPart>(&part)) {
+          added = append_json(
+              item.content,
+              ImageBlock{.type = "document",
+                         .source = ImageSource{.media_type = "application/pdf",
+                                               .data = cail::detail::base64_encode(pdf->bytes)}});
         } else {
           const auto& image = std::get<cail::ImagePart>(part);
           if (message.role != MessageRole::user || image.mime_type.empty() || image.bytes.empty()) {
@@ -481,18 +492,48 @@ public:
     return run(request, on_event, stop);
   }
 
-private:
-  [[nodiscard]] Result<GenerationResponse>
-  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
+  [[nodiscard]] Result<void> generate_async(GenerationRequest request,
+                                            LanguageModel::GenerationCompletion complete,
+                                            std::stop_token stop = {}) const {
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async generation requires a completion handler."});
+    auto http = make_http_request(request, false);
+    if (!http)
+      return std::unexpected(http.error());
+    return cail::detail::send_generation_async(*transport_, std::move(request), std::move(*http),
+                                               std::move(complete), stop, decode_http_response);
+  }
+
+private:
+  [[nodiscard]] static Result<GenerationResponse>
+  decode_http_response(const HttpResponse& response) {
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+    };
+    if (is_http_error_status(response.status_code))
+      return context(http_status_error_from_json_body(response));
+    ResponseBody parsed;
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
+        error)
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = glz::format_error(error, response.body)});
+    auto result = decode(parsed);
+    return result ? result : context(result.error());
+  }
+
+  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
+                                                      bool streaming) const {
     if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
         (config_.max_tokens == 0 && !request.max_output_tokens) || !transport_) {
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                    .message = "Anthropic requires an API key, model, base URL, "
                                               "positive max_tokens, and transport."});
     }
-    auto body = encode(request, config_, static_cast<bool>(on_event));
+    auto body = encode(request, config_, streaming);
     if (!body)
       return std::unexpected(body.error());
     auto encoded = to_json(*body);
@@ -518,11 +559,22 @@ private:
     http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
     http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
-    if (on_event)
+    if (streaming)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
     if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
       return std::unexpected(middleware.error());
     }
+    return http;
+  }
+
+  [[nodiscard]] Result<GenerationResponse>
+  run(const GenerationRequest& request, const StreamHandler& on_event, std::stop_token stop) const {
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto prepared = make_http_request(request, static_cast<bool>(on_event));
+    if (!prepared)
+      return std::unexpected(prepared.error());
+    auto http = std::move(*prepared);
     cail::detail::SseParser parser;
     GenerationResponse partial;
     std::map<std::size_t, cail::ToolCall> pending_calls;
@@ -640,16 +692,8 @@ private:
     if (is_http_error_status(response->status_code)) {
       return context(http_status_error_from_json_body(*response));
     }
-    if (!on_event) {
-      ResponseBody parsed;
-      if (const auto error =
-              glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response->body);
-          error)
-        return context(Error{.code = ErrorCode::provider_response,
-                             .message = glz::format_error(error, response->body)});
-      auto result = decode(parsed);
-      return result ? result : context(result.error());
-    }
+    if (!on_event)
+      return decode_http_response(*response);
     parser.finish(handle_event);
     if (stream_error)
       return context(*stream_error);
@@ -704,8 +748,21 @@ public:
         },
         [client](const GenerationRequest& request, const StreamHandler& handler,
                  std::stop_token stop) { return client->stream(request, handler, stop); },
-        AdapterCapabilities{
-            .image_input = true, .tools = true, .structured_output = true, .reasoning = true}};
+        AdapterCapabilities{.image_input = true,
+                            .pdf_input = true,
+                            .tools = true,
+                            .structured_output = true,
+                            .reasoning = true},
+        [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+                 std::stop_token stop) {
+          return client->generate_async(
+              std::move(request),
+              [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+                complete(std::move(result));
+              },
+              stop);
+        },
+    };
   }
 
   [[nodiscard]] EmbeddingModel

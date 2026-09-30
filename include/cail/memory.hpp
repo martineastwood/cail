@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cail/detail/base64.hpp>
 #include <cail/error.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
@@ -103,7 +104,7 @@ private:
 };
 
 struct StoredConversation {
-  std::size_t version{1};
+  std::size_t version{2};
   std::vector<Message> messages;
 };
 
@@ -125,12 +126,31 @@ public:
     if (!conversation) {
       return std::unexpected(conversation.error());
     }
-    if (conversation->version != 1) {
+    if (conversation->version != 2) {
       return std::unexpected(Error{
           .code = ErrorCode::memory,
           .message = "Unsupported stored conversation version: " +
                      std::to_string(conversation->version) + ".",
       });
+    }
+    for (auto& message : conversation->messages) {
+      for (auto& part : message.content) {
+        auto valid = std::visit(
+            [](auto& value) -> Result<void> {
+              if constexpr (requires { value.bytes; }) {
+                auto bytes = detail::base64_decode(value.bytes);
+                if (!bytes)
+                  return std::unexpected(
+                      Error{.code = ErrorCode::memory,
+                            .message = "Stored attachment contains invalid base64."});
+                value.bytes = std::move(*bytes);
+              }
+              return {};
+            },
+            part);
+        if (!valid)
+          return std::unexpected(valid.error());
+      }
     }
     return std::move(conversation->messages);
   }
@@ -178,7 +198,17 @@ private:
   }
 
   [[nodiscard]] static Result<void> write_file(const std::filesystem::path& file,
-                                               const StoredConversation& conversation) {
+                                               StoredConversation conversation) {
+    for (auto& message : conversation.messages) {
+      for (auto& part : message.content) {
+        std::visit(
+            [](auto& value) {
+              if constexpr (requires { value.bytes; })
+                value.bytes = detail::base64_encode(value.bytes);
+            },
+            part);
+      }
+    }
     auto json = to_json(conversation);
     if (!json) {
       return std::unexpected(json.error());

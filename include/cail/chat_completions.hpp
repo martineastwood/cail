@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cail/detail/async_http.hpp>
+
 #include <cail/detail/base64.hpp>
 #include <cail/detail/glaze_http_transport.hpp>
 #include <cail/detail/http_context.hpp>
@@ -261,6 +263,9 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request, std::string model,
                                                 bool streaming, bool retain_reasoning_content) {
+  if (auto valid = cail::detail::validate_pdf_parts(request, false); !valid) {
+    return std::unexpected(valid.error());
+  }
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -513,23 +518,11 @@ public:
     if (!http) {
       return std::unexpected(http.error());
     }
-    transport_->send_async(
-        std::move(*http),
-        [request = std::move(request), complete = std::move(complete),
-         retain_reasoning = settings_.retain_reasoning_content](Result<HttpResponse> response) {
-          if (!response) {
-            complete(std::unexpected(response.error()));
-            return;
-          }
-          if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
-            complete(std::unexpected(middleware.error()));
-            return;
-          }
-          auto result = decode_http_response(*response, retain_reasoning);
-          complete(std::move(result));
-        },
-        stop);
-    return {};
+    return cail::detail::send_generation_async(
+        *transport_, std::move(request), std::move(*http), std::move(complete), stop,
+        [retain_reasoning = settings_.retain_reasoning_content](const HttpResponse& response) {
+          return decode_http_response(response, retain_reasoning);
+        });
   }
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& on_event,
@@ -811,7 +804,12 @@ public:
         chat_completions_adapter_capabilities(),
         [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
                  std::stop_token stop) {
-          return client->generate_async(std::move(request), std::move(complete), stop);
+          return client->generate_async(
+              std::move(request),
+              [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+                complete(std::move(result));
+              },
+              stop);
         }};
   }
 

@@ -147,6 +147,9 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_openai_memory examples/openai_memory.cpp)
     target_link_libraries(cail_openai_memory PRIVATE cail::cail)
 
+    add_executable(cail_openai_multimodal_memory examples/openai_multimodal_memory.cpp)
+    target_link_libraries(cail_openai_multimodal_memory PRIVATE cail::cail)
+
     add_executable(cail_openai_embed examples/openai_embed.cpp)
     target_link_libraries(cail_openai_embed PRIVATE cail::cail)
 
@@ -236,6 +239,8 @@ if(BUILD_TESTING)
     cail_add_test(foundry)
     cail_add_test(opencode)
     cail_add_test(memory)
+    cail_add_test(loaders)
+    cail_add_test(async)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)

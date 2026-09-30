@@ -14,7 +14,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path == "/chat/error":
+        if self.path.startswith("/async/"):
+            self.path = self.path[len("/async"):]
+            time.sleep(1)
+        if self.path == "/embeddings":
+            self.send_json(200, {"model": "test-model", "data": [
+                {"index": i, "embedding": [0.2, 0.4]} for i, _ in enumerate(body["input"])]})
+        elif self.path == "/gemini/models/test-model:batchEmbedContents":
+            self.send_json(200, {"embeddings": [{"values": [0.2, 0.4]} for _ in body["requests"]]})
+        elif self.path == "/tool-chat":
+            message = {"content": "Done"} if body["messages"][-1]["role"] == "tool" else {
+                "content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {
+                    "name": "count", "arguments": '{"query":"abc"}'}}]}
+            self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop", "message": message}]})
+        elif self.path == "/chat/error":
             self.send_json(429, {"error": {"message": "slow down", "code": "rate_limited", "type": "rate_limit"}},
                            {"X-Request-Id": "req_local"})
         elif self.path == "/chat/hold":
@@ -161,8 +174,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Connection-Id", str(self.client_address[1]))
         for name, content in (headers or {}).items():
             self.send_header(name, content)
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def send_stream(self, events, hold=False):
         self.send_response(200)
@@ -189,7 +205,7 @@ with Server(("127.0.0.1", 0), Handler) as server:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        subprocess.run([sys.argv[1], f"http://127.0.0.1:{server.server_port}"], check=True, timeout=10)
+        subprocess.run([sys.argv[1], f"http://127.0.0.1:{server.server_port}"], check=True, timeout=30)
     finally:
         server.shutdown()
         thread.join()

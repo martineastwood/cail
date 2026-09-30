@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cail/detail/async_http.hpp>
+
 #include <cail/detail/base64.hpp>
 #include <cail/detail/encode_json.hpp>
 #include <cail/detail/env.hpp>
@@ -120,6 +122,9 @@ struct ResponseBody {
 }
 
 [[nodiscard]] inline Result<RequestBody> encode(const GenerationRequest& request) {
+  if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
+    return std::unexpected(valid.error());
+  }
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid)
     return std::unexpected(valid.error());
   if (request.messages.empty() || request.continuation_token)
@@ -200,7 +205,12 @@ struct ResponseBody {
       Result<void> added;
       if (const auto* value = std::get_if<cail::TextPart>(&part))
         added = append_json(content.parts, TextPart{.text = value->text});
-      else {
+      else if (const auto* pdf = std::get_if<cail::PdfPart>(&part)) {
+        added = append_json(
+            content.parts,
+            ImagePart{.inlineData = InlineData{.mimeType = "application/pdf",
+                                               .data = cail::detail::base64_encode(pdf->bytes)}});
+      } else {
         const auto& image = std::get<cail::ImagePart>(part);
         added = append_json(
             content.parts,
@@ -374,7 +384,50 @@ public:
       std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport())
       : config_(std::move(config)), dimensions_(dimensions), transport_(std::move(transport)) {}
 
-  [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs) const {
+  [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs,
+                                                  std::stop_token stop = {}) const {
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto http = make_http_request(inputs);
+    if (!http)
+      return std::unexpected(http.error());
+    auto response = transport_->send(*http, stop);
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    if (!response)
+      return std::unexpected(response.error());
+    return decode_http_response(*response, inputs.size());
+  }
+
+  [[nodiscard]] Result<void> embed_many_async(std::vector<std::string> inputs,
+                                              EmbeddingModel::BatchCompletion complete,
+                                              std::stop_token stop = {}) const {
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async embeddings require a completion handler."});
+    auto http = make_http_request(inputs);
+    if (!http)
+      return std::unexpected(http.error());
+    transport_->send_async(
+        std::move(*http),
+        [this, input_count = inputs.size(), complete = std::move(complete),
+         stop](Result<HttpResponse> response) {
+          if (stop.stop_requested())
+            complete(std::unexpected(generation_cancelled_error()));
+          else if (!response)
+            complete(std::unexpected(response.error()));
+          else
+            complete(decode_http_response(*response, input_count));
+        },
+        stop);
+    return {};
+  }
+
+private:
+  [[nodiscard]] Result<HttpRequest>
+  make_http_request(const std::vector<std::string>& inputs) const {
     if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() ||
         !transport_) {
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -403,27 +456,29 @@ public:
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
     cail::detail::append_session_header(http.headers, config_.request_session_header,
                                         config_.model);
-    auto response = transport_->send(http, {});
-    if (!response)
-      return std::unexpected(response.error());
+    return http;
+  }
+
+  [[nodiscard]] Result<EmbeddingBatch> decode_http_response(const HttpResponse& response,
+                                                            std::size_t input_count) const {
     const auto context = [&](Error error) {
-      return unexpected_with_http_context<EmbeddingBatch>(std::move(error), *response);
+      return unexpected_with_http_context<EmbeddingBatch>(std::move(error), response);
     };
-    if (is_http_error_status(response->status_code)) {
-      return context(http_status_error_from_json_body(*response));
+    if (is_http_error_status(response.status_code)) {
+      return context(http_status_error_from_json_body(response));
     }
     BatchEmbedContentsResponse body;
     if (const auto error =
-            glz::read<glz::opts{.error_on_unknown_keys = false}>(body, response->body);
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(body, response.body);
         error) {
       return context(Error{.code = ErrorCode::provider_response,
-                           .message = glz::format_error(error, response->body)});
+                           .message = glz::format_error(error, response.body)});
     }
-    if (body.embeddings.size() != inputs.size()) {
+    if (body.embeddings.size() != input_count) {
       return context(Error{.code = ErrorCode::provider_response,
                            .message = "Gemini returned an incomplete embedding batch."});
     }
-    EmbeddingBatch result{.embeddings = std::vector<Embedding>(inputs.size()),
+    EmbeddingBatch result{.embeddings = std::vector<Embedding>(input_count),
                           .model = config_.model,
                           .input_tokens = body.usageMetadata ? body.usageMetadata->promptTokenCount
                                                              : std::nullopt};
@@ -441,7 +496,6 @@ public:
     return result;
   }
 
-private:
   // The URL template uses "models/{model}", so accept an ID with or without the prefix.
   [[nodiscard]] std::string model_id() const {
     return config_.model.starts_with("models/") ? config_.model.substr(7) : config_.model;
@@ -468,11 +522,45 @@ public:
     return run(request, handler, stop);
   }
 
-private:
-  [[nodiscard]] Result<GenerationResponse>
-  run(const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) const {
+  [[nodiscard]] Result<void> generate_async(GenerationRequest request,
+                                            LanguageModel::GenerationCompletion complete,
+                                            std::stop_token stop = {}) const {
     if (stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
+    if (!complete)
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Async generation requires a completion handler."});
+    auto http = make_http_request(request, false);
+    if (!http)
+      return std::unexpected(http.error());
+    return cail::detail::send_generation_async(*transport_, std::move(request), std::move(*http),
+                                               std::move(complete), stop, decode_http_response);
+  }
+
+private:
+  [[nodiscard]] static Result<GenerationResponse>
+  decode_http_response(const HttpResponse& response) {
+    const auto context = [&](Error error) {
+      return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
+    };
+    if (is_http_error_status(response.status_code))
+      return context(http_status_error_from_json_body(response));
+    GenerationResponse result;
+    ResponseBody parsed;
+    if (const auto error =
+            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
+        error)
+      return context(Error{.code = ErrorCode::provider_response,
+                           .message = glz::format_error(error, response.body)});
+    if (parsed.candidates.empty())
+      return context(
+          Error{.code = ErrorCode::provider_response, .message = "Gemini returned no candidates."});
+    auto applied = apply_chunk(result, parsed, {});
+    return applied ? Result<GenerationResponse>{std::move(result)} : context(applied.error());
+  }
+
+  [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
+                                                      bool streaming) const {
     if (config_.api_key.empty() || config_.model.empty() || config_.base_url.empty() || !transport_)
       return std::unexpected(
           Error{.code = ErrorCode::invalid_configuration,
@@ -528,7 +616,7 @@ private:
       json = std::move(*merged);
     }
     HttpRequest http{.url = config_.base_url + "/models/" + config_.model +
-                            (handler ? ":streamGenerateContent?alt=sse" : ":generateContent"),
+                            (streaming ? ":streamGenerateContent?alt=sse" : ":generateContent"),
                      .headers = config_.headers,
                      .body = std::move(*json)};
     if (config_.api_key_header.empty())
@@ -538,13 +626,24 @@ private:
         {.name = config_.api_key_header, .value = config_.api_key_prefix + config_.api_key});
     http.headers.push_back({.name = "Content-Type", .value = "application/json"});
     http.headers.push_back({.name = "Connection", .value = "close"});
-    if (handler)
+    if (streaming)
       http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
     cail::detail::append_session_header(http.headers, config_.request_session_header,
                                         request.session_id);
     if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
       return std::unexpected(middleware.error());
     }
+    return http;
+  }
+
+  [[nodiscard]] Result<GenerationResponse>
+  run(const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) const {
+    if (stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
+    auto prepared = make_http_request(request, static_cast<bool>(handler));
+    if (!prepared)
+      return std::unexpected(prepared.error());
+    auto http = std::move(*prepared);
     cail::detail::SseParser parser;
     GenerationResponse result;
     std::optional<Error> stream_error;
@@ -592,17 +691,7 @@ private:
                              .message = "Gemini returned an empty stream."});
       return result;
     }
-    ResponseBody parsed;
-    if (const auto error =
-            glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response->body);
-        error)
-      return context(Error{.code = ErrorCode::provider_response,
-                           .message = glz::format_error(error, response->body)});
-    if (parsed.candidates.empty())
-      return context(
-          Error{.code = ErrorCode::provider_response, .message = "Gemini returned no candidates."});
-    auto applied = apply_chunk(result, parsed, {});
-    return applied ? Result<GenerationResponse>{std::move(result)} : context(applied.error());
+    return decode_http_response(*response);
   }
   Config config_;
   std::unique_ptr<HttpTransport> transport_;
@@ -640,8 +729,21 @@ public:
         },
         [client](const GenerationRequest& request, const StreamHandler& handler,
                  std::stop_token stop) { return client->stream(request, handler, stop); },
-        AdapterCapabilities{
-            .image_input = true, .tools = true, .structured_output = true, .reasoning = true}};
+        AdapterCapabilities{.image_input = true,
+                            .pdf_input = true,
+                            .tools = true,
+                            .structured_output = true,
+                            .reasoning = true},
+        [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+                 std::stop_token stop) {
+          return client->generate_async(
+              std::move(request),
+              [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+                complete(std::move(result));
+              },
+              stop);
+        },
+    };
   }
 
   [[nodiscard]] EmbeddingModel
@@ -655,8 +757,17 @@ public:
             .headers = settings_.headers,
         },
         dimensions);
-    return EmbeddingModel{
-        [client](const std::vector<std::string>& inputs) { return client->embed_many(inputs); }};
+    return EmbeddingModel{[client](const std::vector<std::string>& inputs, std::stop_token stop) {
+                            return client->embed_many(inputs, stop);
+                          },
+                          [client](std::vector<std::string> inputs,
+                                   EmbeddingModel::BatchCompletion complete, std::stop_token stop) {
+                            return client->embed_many_async(
+                                std::move(inputs),
+                                [client, complete = std::move(complete)](
+                                    Result<EmbeddingBatch> result) { complete(std::move(result)); },
+                                stop);
+                          }};
   }
 
 private:

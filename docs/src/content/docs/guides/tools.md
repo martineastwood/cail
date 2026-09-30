@@ -58,31 +58,29 @@ request history and tool definitions directly.
 
 ## Stream a tool loop
 
-Use `stream_tool_loop` when you want events from every model call while CAIL
+Use `stream_text` when you want events from every model call while CAIL
 continues to execute tools:
 
 ```cpp
 std::stop_source stop;
-auto result = cail::stream_tool_loop(
-    cail::openai("gpt-6-luna"),
-    cail::GenerationRequest{
-        .messages = {cail::Message{
-            .content = {cail::TextPart{.text = "Fetch the weather for Paris."}},
-        }},
+auto result = cail::stream_text(
+    {
+        .model = cail::openai("gpt-6-luna"),
+        .prompt = "Fetch the weather for Paris.",
+        .tools = {weather_tool},
+        .tool_loop = {
+            .max_rounds = 4,
+            .stop_when = [](const cail::GenerationResponse& response,
+                            const cail::MiddlewareContext&) {
+                return response.status == cail::GenerationStatus::refused;
+            },
+            .stop = stop.get_token(),
+        },
     },
-    std::vector<cail::Tool>{weather_tool},
     [](const cail::StreamEvent& event) {
         if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
             std::cout << delta->text << std::flush;
         }
-    },
-    {
-        .max_rounds = 4,
-        .stop_when = [](const cail::GenerationResponse& response,
-                        const cail::MiddlewareContext&) {
-            return response.status == cail::GenerationStatus::refused;
-        },
-        .stop = stop.get_token(),
     });
 ```
 
@@ -93,6 +91,53 @@ stream.
 `stop_when` runs after a model step and before its requested tools execute, so
 returning `true` returns that response without starting another step.
 `max_rounds` remains a final guard against unbounded tool calls.
+
+## Run tools without blocking generation
+
+Use `generate_text_async` with the same tools and options as `generate_text`.
+Its completion callback receives the final answer and collected tool results:
+
+```cpp
+auto started = cail::generate_text_async(
+    {
+        .model = cail::openai("gpt-6-luna"),
+        .prompt = "Fetch the weather for Paris.",
+        .tools = {weather_tool},
+    },
+    [](cail::Result<cail::GenerationResponse> result) {
+        if (result) std::cout << result->text << '\n';
+        else std::cerr << result.error().message << '\n';
+    });
+if (!started) {
+    std::cerr << started.error().message << '\n';
+}
+```
+
+Keep your application running until the callback finishes. For manually managed
+requests, use `run_tool_loop_async(model, request, tools, callback, options)`.
+The same `max_rounds`, `stop_when`, and middleware options apply to blocking,
+streaming, and async tool loops.
+
+Tool handlers execute synchronously on the thread processing the model result.
+With async generation this may be an I/O thread, so keep handlers brief. A handler
+that takes time can check `context.stop.stop_requested()` to stop cooperatively.
+You can accept a `const cail::ToolContext&` as your handler's second argument:
+
+```cpp
+auto weather_tool = cail::tool<WeatherQuery, WeatherReport>(
+    "weather", "Get the weather in a location.",
+    [](const WeatherQuery& query, const cail::ToolContext& context)
+        -> cail::Result<WeatherReport> {
+        if (context.stop.stop_requested()) {
+            return std::unexpected(cail::generation_cancelled_error());
+        }
+        return WeatherReport{.location = query.location, .temperature_fahrenheit = 72};
+    });
+```
+
+Set `tool_loop.stop` on your generation options. Cancellation prevents subsequent
+tools and model steps from starting. It cannot force an active tool handler to exit.
+See [Advanced usage](/guides/advanced/) for callback lifetime and cancellation.
 
 ## Next steps
 
