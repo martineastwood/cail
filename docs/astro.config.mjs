@@ -30,8 +30,13 @@ export default defineConfig({
 				{ label: 'Embeddings', slug: 'guides/embeddings' },
 				{ label: 'Providers', slug: 'guides/providers' },
 				{ label: 'Advanced usage', slug: 'guides/advanced' },
-				{ label: 'Compile time', slug: 'reference/compile-time' },
-				{ label: 'Build and test', slug: 'reference/build-and-test' },
+				{
+					label: 'Contributing',
+					items: [
+						{ label: 'Build and test', slug: 'reference/build-and-test' },
+						{ label: 'Compile time', slug: 'reference/compile-time' },
+					],
+				},
 			],
 		}),
 	],

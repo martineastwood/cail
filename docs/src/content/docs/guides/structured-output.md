@@ -40,12 +40,14 @@ JSON conversion emits only the value, while schema inspection reads the
 metadata. To emit the generated JSON Schema yourself, call
 `cail::json_schema<Analysis>()`.
 
-Numeric bounds are inclusive. CAIL checks them locally when decoding JSON,
-including generated objects and typed tool arguments. A confidence of `1.5`
-returns `ErrorCode::schema_validation` with a message such as
-`$.confidence: value does not satisfy maximum.` Nested errors include the
-property path and array index, for example `$.results[1].confidence`.
-The same checks apply to synchronous and asynchronous calls.
+Numeric bounds are inclusive. Use them on any arithmetic `Field` type (for example
+`double`, `int`, or `std::uint64_t`). CAIL checks them locally when decoding JSON
+for `generate_object`, `generate_object_async`, and typed tool arguments. A
+confidence of `1.5` returns `ErrorCode::schema_validation` with a message such as
+`$.confidence: value does not satisfy maximum.` Nested structs and vector elements
+are validated recursively, so errors include the property path and array index,
+for example `$.results[1].confidence`. The same checks apply to synchronous,
+callback, and coroutine (`co_await generate_object_async`) calls.
 
 C++ enums restrict values to their named choices. An unknown choice returns
 `ErrorCode::json_deserialization`.
@@ -70,8 +72,18 @@ The result is a `Result<Analysis>`. Check it before use, as shown in the
 
 ## Generate an object without blocking
 
-Use the same options with `generate_object_async<T>` and receive a typed result
-in your callback:
+Use the same options with `generate_object_async<T>`. Omit the completion callback
+and `co_await` the call inside a `cail::Task`, or pass a callback when you
+prefer event-driven code:
+
+```cpp
+auto analysis = co_await cail::generate_object_async<Analysis>({
+    .model = cail::openai("gpt-6-luna"),
+    .prompt = "Classify this review: ...",
+});
+```
+
+With a completion callback:
 
 ```cpp
 auto started = cail::generate_object_async<Analysis>(
@@ -112,5 +124,6 @@ empty.
 
 ## Next steps
 
+- [Async and coroutines](/guides/async/) to `co_await` typed generation
 - [Tools](/guides/tools/) for typed function tool handlers
 - [Providers](/guides/providers/) for model support per provider

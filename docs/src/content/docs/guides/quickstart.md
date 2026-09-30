@@ -54,21 +54,6 @@ auto model = cail::openai(
 
 Set `max_retries` to `0` to disable retries.
 
-## Build and run an example
-
-The repository ships complete runnable examples. Build them from a checkout:
-
-```sh
-cmake -S . -B build
-cmake --build build
-```
-
-Then run the OpenAI prompt example:
-
-```sh
-OPENAI_API_KEY=... ./build/cail_openai_prompt
-```
-
 ## Stream the reply
 
 Call `LanguageModel::stream()` to receive events as they arrive. The call
@@ -109,7 +94,11 @@ optionality.
 ## Next steps
 
 - [Providers](/guides/providers/) for Anthropic, Gemini, OpenRouter, and local models
+- [Request controls and results](/guides/request-controls/) for temperature, tool choice, and usage
+- [Tools](/guides/tools/) to let the model call your functions
 - [Agent](/guides/agent/) to bundle a model, instructions, and tools
 - [Memory](/guides/memory/) to make an agent remember earlier turns
-- [Tools](/guides/tools/) to let the model call your functions
+- [Files, images, and PDFs](/guides/loaders/) to attach local documents
 - [Streaming](/guides/streaming/) for event types and cancellation
+- [Async and coroutines](/guides/async/) to `co_await` calls from your application
+- [Embeddings](/guides/embeddings/) and [EmbeddingStore](/guides/embeddings/#store-and-search-embeddings) for semantic search

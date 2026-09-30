@@ -21,7 +21,7 @@ hero:
 ---
 
 <div class="landing-shell not-content">
-  <p class="landing-lede">CAIL is a header-only C++23 SDK. Write a generation request once and run it against OpenAI, Anthropic, Gemini, OpenRouter, Mistral, Azure Foundry, Ollama, or your own local server. Streaming, structured outputs, and function tools work the same way everywhere.</p>
+  <p class="landing-lede">CAIL is a header-only C++23 SDK. Write a generation request once and run it against OpenAI, Anthropic, Gemini, OpenRouter, Mistral, Azure Foundry, Charm Hyper, Ollama Cloud, OpenCode, or your own local server. Streaming, structured outputs, tools, agents with memory, embeddings, and local file or PDF attachments use the same provider-neutral API.</p>
 
   <section class="landing-terminal" aria-labelledby="landing-terminal-title">
     <div class="landing-terminal-bar">
@@ -59,6 +59,16 @@ std::cout &lt;&lt; response-&gt;text;</code></pre>
         <span class="landing-card-index">04</span>
         <h3>Streaming everywhere</h3>
         <p>Text, reasoning, tool-call deltas, and usage arrive as typed <code>StreamEvent</code>s, with cancellation through <code>std::stop_token</code>.</p>
+      </article>
+      <article class="landing-card">
+        <span class="landing-card-index">05</span>
+        <h3>Files, memory, and embeddings</h3>
+        <p>Load images and PDFs from disk, give agents durable conversation memory, embed text for search, and use <code>EmbeddingStore</code> for small in-memory collections.</p>
+      </article>
+      <article class="landing-card">
+        <span class="landing-card-index">06</span>
+        <h3>Async and coroutines</h3>
+        <p><code>co_await</code> generation, streaming, and embeddings, or use completion callbacks when you integrate with an existing event loop.</p>
       </article>
     </div>
   </section>

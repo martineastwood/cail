@@ -189,15 +189,26 @@ if (!started) {
 ```
 
 The callback receives the final result after any tool calls. Keep your application
-running until it finishes. Text prompts and single user messages load configured memory before starting
-and append successful turns before invoking the callback. Memory operations are
-synchronous. Calls with an explicit `GenerationRequest` bypass memory.
+running until it finishes. Text prompts and single user messages load configured
+memory before starting and append successful turns before invoking the callback.
+With `generate_async`, those memory loads and appends run asynchronously. Blocking
+`generate` and `stream` use the synchronous memory methods unless your backend
+implements the async overrides. Calls with an explicit `GenerationRequest` bypass
+memory.
 
 Pass `ToolLoopOptions` as the third argument to set `max_rounds`, `stop_when`, or
 `stop`. The request owns the model, tools, and memory backend until completion;
 objects captured by reference in handlers must remain valid. Avoid overlapping
 prompt calls for the same conversation because they can load the same history.
-See [Advanced usage](/guides/advanced/) for async execution and cancellation.
+See [Advanced usage](/guides/advanced/) for callback scheduling and cancellation.
+
+## Stream or await without blocking
+
+`stream_async` runs the same tool loop as `stream`, with events delivered through
+your callback and the final response in a completion callback. For coroutine-based
+code, `co_await agent.stream_async(prompt, on_event)` returns the final
+`GenerationResponse` after events are delivered. See [Async and coroutines](/guides/async/)
+for `co_await agent.generate_async`, task ownership, and cancellation.
 
 ## Next steps
 

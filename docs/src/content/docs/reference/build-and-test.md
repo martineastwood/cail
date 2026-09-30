@@ -1,7 +1,10 @@
 ---
 title: Build and test
-description: Configure, build, test, format, and analyze CAIL with the ./dev script.
+description: Configure, build, test, format, and analyze CAIL when you work on the library.
 ---
+
+This page is for **contributors** working in the CAIL repository. If you only
+use CAIL from your own application, follow [Install](/guides/install/) instead.
 
 The `./dev` script wraps configure, build, test, formatting, and static
 analysis, so you run the same commands locally that CI runs.

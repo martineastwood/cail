@@ -1,6 +1,6 @@
 ---
 title: Compile time
-description: How CAIL's header-only design affects build times, and what you can do about it.
+description: How CAIL's header-only design affects your project's build times.
 ---
 
 CAIL is header-only, so each translation unit that includes it also parses

@@ -149,6 +149,6 @@ need nonempty bytes and a filename when you construct them yourself.
 
 ## Next steps
 
-- [Providers](../providers/) to configure a model that accepts your inputs.
-- [Structured outputs](../structured-output/) to extract document data into C++ types.
-- [Embeddings](../embeddings/) to embed loaded text for search.
+- [Providers](/guides/providers/) to configure a model that accepts your inputs.
+- [Structured outputs](/guides/structured-output/) to extract document data into C++ types.
+- [Embeddings](/guides/embeddings/) to embed loaded text for search.

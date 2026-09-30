@@ -77,37 +77,8 @@ Configure the consumer with `-DCMAKE_PREFIX_PATH=/path/to/cail`.
 Installing CAIL also installs Glaze and magic_enum into the same prefix, so a project that
 consumes the installed package resolves both through `CMAKE_PREFIX_PATH` alone.
 
-### Build and test from source
-
-The `./dev` script wraps configure, build, test, formatting, and static analysis. Run
-everything the way CI does:
-
-```sh
-./dev check
-```
-
-Run one suite while you iterate on an adapter:
-
-```sh
-./dev configure
-./dev build build/dev cail_openai_test
-./dev test build/dev cail_openai
-```
-
-Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`, and
-`cail_opencode`. CAIL also provides `cail_local_http`, which starts a local Python server,
-and `cail_install_smoke`, which builds a consumer against the installed package.
-
-Run the remaining checks before you open a pull request:
-
-```sh
-./dev format        # Check formatting. ./dev format --fix rewrites the files.
-./dev tidy          # clang-tidy over the test translation units.
-./dev sanitizer     # Build and test with ASan and UBSan.
-```
-
-Formatting is pinned to `clang-format` 23.1.1. `./dev format` warns when your local
-version differs from the one CI uses.
+If you are developing CAIL itself, see [Build and test](docs/src/content/docs/reference/build-and-test.md)
+in the docs for the `./dev` workflow and CI checks.
 
 ## Load a local file
 

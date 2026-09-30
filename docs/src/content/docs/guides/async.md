@@ -174,6 +174,8 @@ finishes. Keep your event loop running until active workflows finish.
 
 ## Next steps
 
+- [Structured outputs](/guides/structured-output/) for `co_await generate_object_async`
+- [Request controls and results](/guides/request-controls/) for sampling and usage on async calls
 - [Memory](/guides/memory/) to keep a conversation across awaited calls
 - [Tools](/guides/tools/) to let an agent call your application functions
 - [Advanced usage](/guides/advanced/) for callback-based integrations and retries
