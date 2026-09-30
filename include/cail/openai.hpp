@@ -109,6 +109,8 @@ private:
     if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
       return std::unexpected(valid.error());
     }
+    if (auto valid = cail::detail::validate_request_controls(request, 2.0, 0); !valid)
+      return std::unexpected(valid.error());
     if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
       return std::unexpected(valid.error());
     }
@@ -133,6 +135,11 @@ private:
         .model = config_.model,
         .max_output_tokens = request.max_output_tokens,
     };
+    body.temperature = request.temperature;
+    body.top_p = request.top_p;
+    if (request.tool_choice)
+      body.tool_choice = cail::detail::encode_tool_choice(
+          *request.tool_choice, cail::detail::ToolChoiceFormat::responses);
     if (streaming) {
       body.stream = true;
     }

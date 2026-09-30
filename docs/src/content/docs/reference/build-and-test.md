@@ -10,9 +10,11 @@ analysis, so you run the same commands locally that CI runs.
 
 ```sh
 ./dev check
+./dev tidy
+./dev sanitizer
 ```
 
-Runs everything: formatting, configure, build, unit tests, clang-tidy, and an
+Together these run formatting, configure, build, unit tests, clang-tidy, and an
 ASan/UBSan build and test. Use it for release readiness or major build and
 toolchain changes.
 
@@ -27,11 +29,11 @@ Configure once per build directory, then build and run what you need:
 ```
 
 Other unit-test groups are `cail_core`, `cail_chat_completions`, `cail_foundry`,
-`cail_memory`, and `cail_opencode`. `cail_local_http` starts a local Python
+`cail_memory`, `cail_opencode`, and `cail_request_controls`. `cail_local_http` starts a local Python
 server, and `cail_install_smoke` builds a consumer against the installed
 package.
 
-Run `./dev test -N` to list the available suites.
+Run `ctest --test-dir build/dev -N` to list the available suites.
 
 ## Formatting and analysis
 
@@ -51,8 +53,8 @@ local version differs from the one CI uses.
 Build example targets from a configured build directory:
 
 ```sh
-cmake --build build --target cail_openai_prompt cail_openai_stream
-./build/cail_openai_prompt
+cmake --build build/dev --target cail_openai_prompt cail_openai_stream
+./build/dev/cail_openai_prompt
 ```
 
 Set the provider's API key in your environment before running, for example

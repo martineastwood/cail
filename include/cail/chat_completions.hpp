@@ -97,6 +97,10 @@ struct RequestBody {
   };
   std::optional<ResponseFormat> response_format;
   std::optional<std::size_t> max_tokens;
+  std::optional<double> temperature;
+  std::optional<double> top_p;
+  std::optional<glz::generic> tool_choice;
+  std::optional<std::vector<std::string>> stop;
 };
 struct Usage {
   std::size_t prompt_tokens{};
@@ -232,15 +236,9 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
       retain_reasoning_content, message.reasoning_content.value_or(""),
       message.reasoning_details ? std::optional<std::string>{message.reasoning_details->str}
                                 : std::nullopt);
-  if (message.refusal) {
+  if (message.refusal)
     result.status = GenerationStatus::refused;
-  } else if (choice.finish_reason == "length") {
-    result.status = GenerationStatus::incomplete;
-  } else if (choice.finish_reason != "stop" && choice.finish_reason != "tool_calls") {
-    return std::unexpected(
-        Error{.code = ErrorCode::provider_response,
-              .message = "Chat Completions returned an unsupported finish reason."});
-  }
+  cail::detail::apply_finish_reason(result, choice.finish_reason);
   if (message.tool_calls) {
     for (const auto& call : *message.tool_calls) {
       if (!call.id || call.id->empty() || !call.function || !call.function->name ||
@@ -266,6 +264,8 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
   if (auto valid = cail::detail::validate_pdf_parts(request, false); !valid) {
     return std::unexpected(valid.error());
   }
+  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 4); !valid)
+    return std::unexpected(valid.error());
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -281,6 +281,13 @@ round_trip_options(bool retain_reasoning_content, std::string_view reasoning_con
   }
   RequestBody body{.model = std::move(model)};
   body.max_tokens = request.max_output_tokens;
+  body.temperature = request.temperature;
+  body.top_p = request.top_p;
+  if (request.tool_choice)
+    body.tool_choice = cail::detail::encode_tool_choice(
+        *request.tool_choice, cail::detail::ToolChoiceFormat::chat_completions);
+  if (!request.stop_sequences.empty())
+    body.stop = request.stop_sequences;
   if (streaming) {
     body.stream = true;
     if (request.stream_usage.value_or(true)) {
@@ -708,13 +715,7 @@ private:
         }
         if (choice.finish_reason) {
           finished = true;
-          if (*choice.finish_reason == "length")
-            partial.status = GenerationStatus::incomplete;
-          else if (*choice.finish_reason != "stop" && *choice.finish_reason != "tool_calls") {
-            stream_error =
-                Error{.code = ErrorCode::provider_response,
-                      .message = "Chat Completions returned an unsupported finish reason."};
-          }
+          cail::detail::apply_finish_reason(partial, choice.finish_reason);
         }
       }
     };

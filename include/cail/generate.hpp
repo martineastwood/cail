@@ -22,6 +22,10 @@ struct GenerateTextOptions {
   ToolLoopOptions tool_loop;
   std::string session_id;
   std::optional<std::size_t> max_output_tokens;
+  std::optional<double> temperature;
+  std::optional<double> top_p;
+  std::vector<std::string> stop_sequences;
+  std::optional<ToolChoice> tool_choice;
   std::optional<bool> stream_usage;
   ProviderOptions provider_options;
   std::vector<GenerationMiddleware> middleware;
@@ -55,6 +59,10 @@ prepare_generation_request(GenerateTextOptions& options) {
       .structured_output = std::move(options.structured_output),
       .session_id = std::move(options.session_id),
       .max_output_tokens = options.max_output_tokens,
+      .temperature = options.temperature,
+      .top_p = options.top_p,
+      .stop_sequences = std::move(options.stop_sequences),
+      .tool_choice = std::move(options.tool_choice),
       .stream_usage = options.stream_usage,
       .provider_options = std::move(options.provider_options),
       .middleware = std::move(options.middleware),

@@ -13,13 +13,13 @@ struct PendingHttp {
   std::stop_token stop;
   int blocking_calls{};
 
-  void reply(std::string body, int status = 200) {
+  void reply(const std::string& body, int status = 200) {
     auto callback = std::exchange(complete, {});
     check(static_cast<bool>(callback), "HTTP completion is pending");
     if (callback) {
       callback(cail::HttpResponse{.status_code = status,
                                   .headers = {{.name = "x-request-id", .value = "request-1"}},
-                                  .body = std::move(body)});
+                                  .body = body});
     }
   }
 };

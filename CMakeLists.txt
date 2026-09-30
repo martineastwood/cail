@@ -123,6 +123,9 @@ install(
 option(CAIL_BUILD_EXAMPLES "Build the SDK examples" ON)
 
 if(CAIL_BUILD_EXAMPLES)
+    add_executable(cail_request_controls examples/request_controls.cpp)
+    target_link_libraries(cail_request_controls PRIVATE cail::cail)
+
     add_executable(cail_typed_schema examples/typed_schema.cpp)
     target_link_libraries(cail_typed_schema PRIVATE cail::cail)
 
@@ -241,6 +244,7 @@ if(BUILD_TESTING)
     cail_add_test(memory)
     cail_add_test(loaders)
     cail_add_test(async)
+    cail_add_test(request_controls)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)

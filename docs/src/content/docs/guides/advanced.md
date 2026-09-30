@@ -204,6 +204,9 @@ auto response = cail::generate_text({
 });
 ```
 
+See [Request controls and results](/guides/request-controls/) for sampling, stop
+sequences, tool choice, finish reasons, and usage across model steps.
+
 ## Provider-specific options
 
 You can pass provider-specific JSON fields on a request or in message history

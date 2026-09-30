@@ -133,7 +133,7 @@ void test_embedding_model_requires_one_vector() {
   check(!unconfigured && unconfigured.error().code == cail::ErrorCode::invalid_configuration,
         "a default embedding model reports that it has no provider");
 
-  cail::EmbeddingModel model{[](const std::vector<std::string>& inputs, std::stop_token) {
+  cail::EmbeddingModel model{[](const std::vector<std::string>& inputs, const std::stop_token&) {
     return cail::Result<cail::EmbeddingBatch>{cail::EmbeddingBatch{
         .embeddings = std::vector<cail::Embedding>(inputs.size()), .model = "stub"}};
   }};

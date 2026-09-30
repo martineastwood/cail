@@ -25,6 +25,7 @@ export default defineConfig({
 				{ label: 'Memory', slug: 'guides/memory' },
 				{ label: 'Files, images, and PDFs', slug: 'guides/loaders' },
 				{ label: 'Streaming', slug: 'guides/streaming' },
+				{ label: 'Request controls and results', slug: 'guides/request-controls' },
 				{ label: 'Embeddings', slug: 'guides/embeddings' },
 				{ label: 'Providers', slug: 'guides/providers' },
 				{ label: 'Advanced usage', slug: 'guides/advanced' },

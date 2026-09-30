@@ -85,6 +85,10 @@ struct RequestBody {
     } format;
   };
   std::optional<OutputConfig> output_config;
+  std::optional<double> temperature;
+  std::optional<double> top_p;
+  std::optional<glz::generic> tool_choice;
+  std::optional<std::vector<std::string>> stop_sequences;
 };
 struct Usage {
   std::optional<std::size_t> input_tokens;
@@ -134,6 +138,10 @@ struct StreamBody {
   if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
     return std::unexpected(valid.error());
   }
+  if (auto valid = cail::detail::validate_request_controls(request, 1.0,
+                                                           std::numeric_limits<std::size_t>::max());
+      !valid)
+    return std::unexpected(valid.error());
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -147,6 +155,13 @@ struct StreamBody {
   }
   RequestBody body{.model = config.model,
                    .max_tokens = request.max_output_tokens.value_or(config.max_tokens)};
+  body.temperature = request.temperature;
+  body.top_p = request.top_p;
+  if (request.tool_choice)
+    body.tool_choice = cail::detail::encode_tool_choice(*request.tool_choice,
+                                                        cail::detail::ToolChoiceFormat::anthropic);
+  if (!request.stop_sequences.empty())
+    body.stop_sequences = request.stop_sequences;
   if (streaming)
     body.stream = true;
   if (request.structured_output) {
@@ -316,27 +331,17 @@ struct StreamBody {
 }
 
 inline void apply_usage(TokenUsage& target, const Usage& usage) {
-  if (usage.input_tokens)
-    target.input_tokens = *usage.input_tokens;
+  const auto uncached_input =
+      usage.input_tokens.value_or(target.input_tokens - target.cache_read_tokens.value_or(0) -
+                                  target.cache_write_tokens.value_or(0));
   if (usage.output_tokens)
     target.output_tokens = *usage.output_tokens;
   if (usage.cache_read_input_tokens)
     target.cache_read_tokens = usage.cache_read_input_tokens;
   if (usage.cache_creation_input_tokens)
     target.cache_write_tokens = usage.cache_creation_input_tokens;
-}
-
-[[nodiscard]] inline Result<void> apply_stop_reason(GenerationResponse& result,
-                                                    const std::optional<std::string>& reason) {
-  if (reason == "max_tokens")
-    result.status = GenerationStatus::incomplete;
-  else if (reason == "refusal")
-    result.status = GenerationStatus::refused;
-  else if (reason != "end_turn" && reason != "tool_use" && reason != "stop_sequence") {
-    return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                 .message = "Anthropic returned an unsupported stop reason."});
-  }
-  return {};
+  target.input_tokens =
+      uncached_input + target.cache_read_tokens.value_or(0) + target.cache_write_tokens.value_or(0);
 }
 
 struct ThinkingBlock {
@@ -363,9 +368,7 @@ struct ThinkingBlock {
 
 [[nodiscard]] inline Result<GenerationResponse> decode(const ResponseBody& body) {
   GenerationResponse result;
-  auto status = apply_stop_reason(result, body.stop_reason);
-  if (!status)
-    return std::unexpected(status.error());
+  cail::detail::apply_finish_reason(result, body.stop_reason);
   std::vector<ThinkingBlock> thinking;
   for (const auto& block : body.content) {
     if (block.type == "thinking" || block.type == "redacted_thinking")
@@ -659,9 +662,8 @@ private:
         }
       } else if (chunk.type == "message_delta") {
         if (chunk.delta) {
-          auto status = apply_stop_reason(partial, chunk.delta->stop_reason);
-          if (!status)
-            stream_error = status.error();
+          if (chunk.delta->stop_reason)
+            cail::detail::apply_finish_reason(partial, chunk.delta->stop_reason);
         }
         if (chunk.usage) {
           if (!partial.usage)

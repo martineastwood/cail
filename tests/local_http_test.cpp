@@ -142,10 +142,11 @@ int main(int argc, char** argv) {
   }
   check(std::chrono::steady_clock::now() - providers_began < std::chrono::milliseconds{800},
         "native providers return before delayed responses");
-  for (auto& response : provider_results)
+  for (auto& response : provider_results) {
     check(response.wait_for(std::chrono::seconds{5}) == std::future_status::ready &&
               response.get().has_value(),
           "native async providers decode live HTTP responses");
+  }
   for (const auto& model : async_providers) {
     std::promise<cail::Result<cail::GenerationResponse>> completion;
     auto result = completion.get_future();

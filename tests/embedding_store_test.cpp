@@ -23,7 +23,7 @@ void test_embedding_store_search() {
   std::size_t calls = 0;
   cail::EmbeddingStore store(
       cail::EmbeddingModel{[&calls](const std::vector<std::string>& inputs,
-                                    std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
+                                    const std::stop_token&) -> cail::Result<cail::EmbeddingBatch> {
         ++calls;
         cail::EmbeddingBatch batch{.model = "stub", .dimensions = 2};
         for (const auto& input : inputs) {
@@ -64,7 +64,7 @@ void test_embedding_store_upsert_and_clear() {
   std::size_t calls = 0;
   cail::EmbeddingStore store(
       cail::EmbeddingModel{[&calls](const std::vector<std::string>& inputs,
-                                    std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
+                                    const std::stop_token&) -> cail::Result<cail::EmbeddingBatch> {
         ++calls;
         cail::EmbeddingBatch batch{.model = "stub", .dimensions = 2};
         for (const auto& input : inputs) {
@@ -92,12 +92,13 @@ void test_embedding_store_upsert_and_clear() {
 
 void test_embedding_store_empty_and_errors() {
   std::size_t calls = 0;
-  cail::EmbeddingModel model{[&calls](const std::vector<std::string>&,
-                                      std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
-    ++calls;
-    return std::unexpected(
-        cail::Error{.code = cail::ErrorCode::provider_response, .message = "boom"});
-  }};
+  cail::EmbeddingModel model{
+      [&calls](const std::vector<std::string>&,
+               const std::stop_token&) -> cail::Result<cail::EmbeddingBatch> {
+        ++calls;
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::provider_response, .message = "boom"});
+      }};
 
   cail::EmbeddingStore store(model);
   const auto empty = store.search("anything");
@@ -116,7 +117,7 @@ void test_embedding_store_dimension_mismatch() {
   std::size_t calls = 0;
   cail::EmbeddingStore store(
       cail::EmbeddingModel{[&calls](const std::vector<std::string>& inputs,
-                                    std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
+                                    const std::stop_token&) -> cail::Result<cail::EmbeddingBatch> {
         const std::size_t dimensions = calls == 0 ? 2 : 3;
         ++calls;
         cail::EmbeddingBatch batch{.model = "stub", .dimensions = dimensions};
@@ -137,7 +138,7 @@ void test_embedding_store_dimension_mismatch() {
   bool query_is_three = true;
   cail::EmbeddingStore search_store(cail::EmbeddingModel{
       [&query_is_three](const std::vector<std::string>& inputs,
-                        std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
+                        const std::stop_token&) -> cail::Result<cail::EmbeddingBatch> {
         const std::size_t dimensions = query_is_three && inputs.size() == 1 ? 3 : 2;
         query_is_three = false;
         cail::EmbeddingBatch batch{.model = "stub", .dimensions = dimensions};

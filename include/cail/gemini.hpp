@@ -79,12 +79,22 @@ struct GenerationConfig {
   std::optional<std::string> responseMimeType;
   std::optional<glz::raw_json> responseJsonSchema;
   std::optional<std::size_t> maxOutputTokens;
+  std::optional<double> temperature;
+  std::optional<double> topP;
+  std::optional<std::vector<std::string>> stopSequences;
 };
 struct RequestBody {
   std::vector<Content> contents;
   std::optional<Content> systemInstruction;
   std::optional<std::vector<Tool>> tools;
   std::optional<GenerationConfig> generationConfig;
+  struct ToolConfig {
+    struct FunctionCallingConfig {
+      std::string mode;
+      std::optional<std::vector<std::string>> allowedFunctionNames;
+    } functionCallingConfig;
+  };
+  std::optional<ToolConfig> toolConfig;
 };
 struct OutputPart {
   std::optional<std::string> text;
@@ -125,6 +135,8 @@ struct ResponseBody {
   if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
     return std::unexpected(valid.error());
   }
+  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 5); !valid)
+    return std::unexpected(valid.error());
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid)
     return std::unexpected(valid.error());
   if (request.messages.empty() || request.continuation_token)
@@ -132,8 +144,24 @@ struct ResponseBody {
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Gemini requires messages and does not accept continuation tokens."});
   RequestBody body;
-  if (request.max_output_tokens)
-    body.generationConfig = GenerationConfig{.maxOutputTokens = request.max_output_tokens};
+  if (request.max_output_tokens || request.temperature || request.top_p ||
+      !request.stop_sequences.empty()) {
+    body.generationConfig = GenerationConfig{.maxOutputTokens = request.max_output_tokens,
+                                             .temperature = request.temperature,
+                                             .topP = request.top_p};
+    if (!request.stop_sequences.empty())
+      body.generationConfig->stopSequences = request.stop_sequences;
+  }
+  if (request.tool_choice) {
+    const auto& choice = *request.tool_choice;
+    body.toolConfig = RequestBody::ToolConfig{
+        .functionCallingConfig = {.mode = choice.mode == ToolChoiceMode::none    ? "NONE"
+                                          : choice.mode == ToolChoiceMode::auto_ ? "AUTO"
+                                                                                 : "ANY"}};
+    if (choice.mode == ToolChoiceMode::named)
+      body.toolConfig->functionCallingConfig.allowedFunctionNames =
+          std::vector<std::string>{choice.name};
+  }
   for (const auto& message : request.messages) {
     if (message.role == MessageRole::developer)
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -281,12 +309,13 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
     result.usage.emplace();
   if (usage.promptTokenCount)
     result.usage->input_tokens = *usage.promptTokenCount;
-  if (usage.candidatesTokenCount)
-    result.usage->output_tokens = *usage.candidatesTokenCount;
+  const auto candidate_tokens = usage.candidatesTokenCount.value_or(
+      result.usage->output_tokens - result.usage->reasoning_tokens.value_or(0));
   if (usage.cachedContentTokenCount)
     result.usage->cache_read_tokens = *usage.cachedContentTokenCount;
   if (usage.thoughtsTokenCount)
     result.usage->reasoning_tokens = *usage.thoughtsTokenCount;
+  result.usage->output_tokens = candidate_tokens + result.usage->reasoning_tokens.value_or(0);
 }
 
 [[nodiscard]] inline Result<void> apply_chunk(GenerationResponse& result, const ResponseBody& body,
@@ -299,17 +328,10 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
   if (body.candidates.empty())
     return {};
   const auto& candidate = body.candidates.front();
-  if (candidate.finishReason) {
-    if (*candidate.finishReason == "MAX_TOKENS")
-      result.status = GenerationStatus::incomplete;
-    else if (*candidate.finishReason == "SAFETY" || *candidate.finishReason == "RECITATION" ||
-             *candidate.finishReason == "PROHIBITED_CONTENT")
-      result.status = GenerationStatus::refused;
-    else if (*candidate.finishReason != "STOP")
-      return std::unexpected(
-          Error{.code = ErrorCode::provider_response,
-                .message = "Gemini stopped with reason " + *candidate.finishReason + "."});
-  }
+  if (candidate.finishReason)
+    cail::detail::apply_finish_reason(result, candidate.finishReason);
+  if (result.finish_reason == FinishReason::stop && !result.tool_calls.empty())
+    result.finish_reason = FinishReason::tool_calls;
   if (!candidate.content)
     return {};
   for (const auto& part : candidate.content->parts) {
@@ -347,6 +369,8 @@ inline void apply_usage(GenerationResponse& result, const Usage& usage) {
       result.tool_calls.push_back(std::move(mapped));
     }
   }
+  if (result.finish_reason == FinishReason::stop && !result.tool_calls.empty())
+    result.finish_reason = FinishReason::tool_calls;
   return {};
 }
 

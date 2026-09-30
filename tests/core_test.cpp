@@ -235,12 +235,12 @@ void test_text_generation_options() {
     });
     std::stop_source stop;
     auto model = cail::LanguageModel(
-        [&, client](const cail::GenerationRequest& request, std::stop_token token) {
+        [&, client](const cail::GenerationRequest& request, const std::stop_token& token) {
           check(token == stop.get_token(), "generate_text forwards cancellation token");
           return client->generate(request, token);
         },
         [&, client](const cail::GenerationRequest& request, const cail::StreamHandler& handler,
-                    std::stop_token token) {
+                    const std::stop_token& token) {
           check(token == stop.get_token(), "stream_text forwards cancellation token");
           return client->stream(request, handler, token);
         });
@@ -275,8 +275,9 @@ void test_text_generation_options() {
         streaming
             ? cail::stream_text(options,
                                 [&](const cail::StreamEvent& event) {
-                                  if (const auto* delta = std::get_if<cail::TextDelta>(&event))
+                                  if (const auto* delta = std::get_if<cail::TextDelta>(&event)) {
                                     text += delta->text;
+                                  }
                                 })
             : cail::generate_text(options);
     check(result && result->text == "counted" && result->tool_results.size() == 1 &&
@@ -285,8 +286,9 @@ void test_text_generation_options() {
     check(!streaming || text == "checkingcounted", "stream_text forwards every model step");
     check(steps == std::vector<std::size_t>{0, 1}, "both text APIs run step middleware");
     check(client->requests.size() == 2, "both text APIs make a tool follow-up request");
-    if (client->requests.size() != 2)
+    if (client->requests.size() != 2) {
       continue;
+    }
     const auto& first = client->requests.front();
     check(first.messages.size() == 3 && first.messages.front().role == cail::MessageRole::system &&
               std::get<cail::TextPart>(first.messages.front().content.front()).text ==
@@ -306,11 +308,12 @@ void test_text_generation_options() {
 void test_stream_text_validation_and_cancellation() {
   int calls = 0;
   auto model = cail::LanguageModel(
-      [&](const cail::GenerationRequest&, std::stop_token) {
+      [&](const cail::GenerationRequest&, const std::stop_token&) {
         ++calls;
         return cail::GenerationResponse{.text = "done"};
       },
-      [&](const cail::GenerationRequest&, const cail::StreamHandler& handler, std::stop_token) {
+      [&](const cail::GenerationRequest&, const cail::StreamHandler& handler,
+          const std::stop_token&) {
         ++calls;
         handler(cail::ReasoningDelta{.text = "thinking"});
         handler(cail::TextDelta{.text = "done"});
@@ -348,7 +351,7 @@ void test_stream_text_validation_and_cancellation() {
   check(!cancelled && cancelled.error().code == cail::ErrorCode::cancelled && events == 2,
         "stream_text forwards typed events and observes cancellation from the callback");
   const auto unsupported = cail::stream_text(
-      {.model = cail::LanguageModel([](const cail::GenerationRequest&, std::stop_token) {
+      {.model = cail::LanguageModel([](const cail::GenerationRequest&, const std::stop_token&) {
          return cail::GenerationResponse{};
        }),
        .prompt = "hello"},

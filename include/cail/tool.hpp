@@ -167,6 +167,18 @@ public:
       return std::unexpected(generation_cancelled_error());
     if (!response)
       return std::unexpected(response.error());
+    steps.push_back(GenerationStep{.step = request.step,
+                                   .text = response->text,
+                                   .reasoning = response->reasoning,
+                                   .finish_reason = response->finish_reason,
+                                   .raw_finish_reason = response->raw_finish_reason,
+                                   .usage = response->usage,
+                                   .tool_calls = response->tool_calls});
+    if (response->usage) {
+      if (!total_usage)
+        total_usage.emplace();
+      add_usage(*total_usage, *response->usage);
+    }
     bool stopped = false;
     if (options.stop_when) {
       try {
@@ -190,8 +202,11 @@ public:
         .tool_calls = response->tool_calls,
         .provider_options = response->provider_options,
     };
-    if (stopped || response->tool_calls.empty()) {
+    if (stopped || response->status != GenerationStatus::completed ||
+        response->tool_calls.empty()) {
       turn.push_back(std::move(assistant));
+      response->steps = std::move(steps);
+      response->total_usage = total_usage;
       response->turn = std::move(turn);
       response->tool_results = std::move(tool_results);
       result = std::move(*response);
@@ -207,10 +222,18 @@ public:
         .continuation_token = response->continuation_token,
         .session_id = request.session_id,
         .max_output_tokens = request.max_output_tokens,
+        .temperature = request.temperature,
+        .top_p = request.top_p,
+        .stop_sequences = request.stop_sequences,
+        .tool_choice =
+            request.tool_choice && (request.tool_choice->mode == ToolChoiceMode::required ||
+                                    request.tool_choice->mode == ToolChoiceMode::named)
+                ? std::optional<ToolChoice>{ToolChoice{}}
+                : request.tool_choice,
         .stream_usage = request.stream_usage,
         .provider_options = request.provider_options,
         .middleware = request.middleware,
-        .step = round + 1,
+        .step = request.step + 1,
     };
     if (!response->continuation_token) {
       follow_up.messages = request.messages;
@@ -250,6 +273,8 @@ public:
 
 private:
   std::vector<Tool> tools;
+  std::vector<GenerationStep> steps;
+  std::optional<TokenUsage> total_usage;
   std::vector<ToolResult> tool_results;
   std::vector<Message> turn;
   std::size_t round{};

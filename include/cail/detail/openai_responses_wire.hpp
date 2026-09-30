@@ -78,6 +78,9 @@ struct RequestBody {
   std::optional<TextOptions> text;
   std::optional<bool> stream;
   std::optional<std::size_t> max_output_tokens;
+  std::optional<double> temperature;
+  std::optional<double> top_p;
+  std::optional<glz::generic> tool_choice;
 };
 
 struct ResponseContent {
@@ -121,6 +124,10 @@ struct ResponseBody {
   std::vector<glz::raw_json> output;
   std::optional<ResponseUsage> usage;
   std::optional<ProviderError> error;
+  struct IncompleteDetails {
+    std::optional<std::string> reason;
+  };
+  std::optional<IncompleteDetails> incomplete_details;
 };
 
 struct StreamEventBody {
@@ -164,8 +171,12 @@ struct StreamEventBody {
 
   GenerationResponse result;
   result.continuation_token = response_body.id;
+  cail::detail::apply_finish_reason(result, response_body.incomplete_details
+                                                ? response_body.incomplete_details->reason
+                                                : std::optional<std::string>{response_body.status});
   if (response_body.status == "incomplete") {
-    result.status = GenerationStatus::incomplete;
+    if (result.status != GenerationStatus::refused)
+      result.status = GenerationStatus::incomplete;
   } else if (response_body.status != "completed") {
     return std::unexpected(Error{
         .code = ErrorCode::provider_response,
@@ -247,6 +258,10 @@ struct StreamEventBody {
                                 : std::nullopt,
     };
   }
+  if (result.status == GenerationStatus::refused)
+    result.finish_reason = FinishReason::content_filter;
+  else if (result.finish_reason == FinishReason::stop && !result.tool_calls.empty())
+    result.finish_reason = FinishReason::tool_calls;
   return result;
 }
 

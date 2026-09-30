@@ -47,7 +47,7 @@ source_files() {
 # CAIL is header-only, so clang-tidy reaches the library through the test
 # translation units and reports on include/ via HeaderFilterRegex.
 tidy_files() {
-  find tests -type f -name '*.cpp' | sort
+  find tests -maxdepth 1 -type f -name '*.cpp' | sort
 }
 
 usage() {
@@ -149,7 +149,13 @@ cmd_tidy() {
 
   local sdkroot
   sdkroot="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
-  [[ -n "$sdkroot" ]] && args+=(-extra-arg=-isysroot -extra-arg="$sdkroot")
+  if [[ -n "$sdkroot" ]]; then
+    args+=(-extra-arg=-isysroot -extra-arg="$sdkroot")
+    # Match Apple Clang's implicit includes when using Homebrew clang-tidy.
+    local libcxx="$(dirname "$(xcrun --find clang++)")/../include/c++/v1"
+    [[ -d "$libcxx" ]] && args+=(-extra-arg=-isystem -extra-arg="$libcxx")
+    [[ -d /usr/local/include ]] && args+=(-extra-arg=-I/usr/local/include)
+  fi
 
   local files
   files="$(tidy_files)"

@@ -348,6 +348,31 @@ separate prompt field. Your application owns this vector and should append
 `result->turn` after successful calls. Keep the agent's instructions out of `history`,
 because `Agent` adds them as the system message.
 
+## Request controls and results
+
+You can set `temperature`, `top_p`, `stop_sequences`, and `tool_choice` alongside
+`max_output_tokens` on generation options or a `GenerationRequest`. Unsupported
+stop sequences and invalid controls return `invalid_configuration` before HTTP.
+Model-specific restrictions return provider errors.
+
+```cpp
+auto response = cail::generate_text({
+    .model = cail::gemini("gemini-2.5-flash"),
+    .prompt = "Give me three concise tips for learning C++.",
+    .max_output_tokens = 512,
+    .temperature = 0.4,
+    .stop_sequences = {"END"},
+});
+```
+
+Results include `finish_reason` and `raw_finish_reason`. High-level generation
+also preserves every model call in `steps` and sums reported token counts in
+`total_usage`; `usage` describes the final call. Forced tool choices apply to the
+first step, followed by automatic choice after tools return.
+
+See [Request controls and results](docs/src/content/docs/guides/request-controls.md)
+for provider limits, tool choice, finish reasons, and usage details.
+
 ## Streaming
 
 Use `stream_text()` with the same options as `generate_text()` to receive events as they arrive. The call returns the
