@@ -68,4 +68,4 @@ Checks: >
   -readability-magic-numbers,
   -readability-function-cognitive-complexity
 WarningsAsErrors: '*'
-HeaderFilterRegex: '^include/.*'
+HeaderFilterRegex: '.*[/\\]include[/\\].*'

@@ -142,6 +142,9 @@ cmd_tidy() {
     die "missing $BUILD_DIR/compile_commands.json; run ./dev configure first"
 
   local args=(-p "$BUILD_DIR" -quiet)
+  local line_filter
+  line_filter="$(python3 -c 'import json, pathlib; print(json.dumps([{"name": str(path.resolve()), "lines": [[1, 1000000]]} for path in pathlib.Path("include").rglob("*") if path.suffix in {".h", ".hpp"}]))')"
+  args+=(--line-filter="$line_filter")
   local tidy_jobs="$JOBS"
   if [[ "${1:-}" == "--fix" ]]; then
     args+=(-fix)
