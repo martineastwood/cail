@@ -141,7 +141,7 @@ void test_lazy_ownership() {
   check(requests == 0, "unused coroutine tasks do not start requests");
 }
 
-cail::Task<void> agent_calls(cail::Agent agent) {
+cail::Task<void> agent_generation_calls(cail::Agent& agent) {
   const auto generated = co_await agent.generate_async("hello");
   check(generated.has_value(), "await agent generation with memory");
   const auto message =
@@ -149,14 +149,17 @@ cail::Task<void> agent_calls(cail::Agent agent) {
   check(message.has_value(), "await agent message generation");
   const auto explicit_request = co_await agent.generate_async(cail::GenerationRequest{});
   check(explicit_request.has_value(), "await explicit agent requests");
+}
+
+cail::Task<void> agent_stream_calls(cail::Agent& agent) {
   int events = 0;
-  const auto streamed = co_await agent.stream_async("hello", [&](const auto&) { ++events; });
+  auto on_event = [&](const auto&) { ++events; };
+  const auto streamed = co_await agent.stream_async("hello", on_event);
   check(streamed && events == 1, "await agent streaming with memory");
   const auto streamed_message = co_await agent.stream_async(
-      cail::Message{.content = {cail::TextPart{.text = "hello"}}}, [&](const auto&) { ++events; });
+      cail::Message{.content = {cail::TextPart{.text = "hello"}}}, on_event);
   check(streamed_message.has_value(), "await agent message streaming");
-  const auto streamed_request =
-      co_await agent.stream_async(cail::GenerationRequest{}, [&](const auto&) { ++events; });
+  const auto streamed_request = co_await agent.stream_async(cail::GenerationRequest{}, on_event);
   check(streamed_request.has_value(), "await explicit agent streaming");
 }
 
@@ -241,8 +244,10 @@ int main() {
   test::test_deferred();
   test::test_lazy_ownership();
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
-  cail::run(test::agent_calls(cail::Agent(
-      {.model = test::immediate_model(), .memory = memory, .conversation_id = "chat"})));
+  auto agent =
+      cail::Agent({.model = test::immediate_model(), .memory = memory, .conversation_id = "chat"});
+  cail::run(test::agent_generation_calls(agent));
+  cail::run(test::agent_stream_calls(agent));
   test::check(memory->load("chat")->size() == 8,
               "awaited agents store complete turns before returning");
   cail::run(test::cancelled_call(test::immediate_model()));
