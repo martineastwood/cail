@@ -5,7 +5,7 @@ A typed C++ SDK for LLM providers, with a provider-neutral model and generation 
 > **CAIL is in alpha.** Interfaces can change without notice between releases.
 > Pin the version you consume and check the API before you upgrade.
 
-The documentation lives at <https://martineastwood.github.io/cail/> and is built from the
+The documentation lives at <https://cail.niminal.dev/> and is built from the
 files in [`docs/`](docs/). Run the site locally with `npm run dev` in `docs/`.
 
 ## Your first request
@@ -266,7 +266,7 @@ on the options to limit how many previous turns are sent.
 If your history lives in a database or another store, implement the
 `cail::ConversationMemory` interface and pass it as `.memory` instead. It provides
 `load`, `append`, and `clear` operations for each conversation id. See
-[Memory](https://martineastwood.github.io/cail/guides/memory/) for the built-in and custom
+[Memory](https://cail.niminal.dev/guides/memory/) for the built-in and custom
 backends.
 
 Pass a single user `Message` to remember images and PDFs alongside text:
@@ -953,8 +953,8 @@ so it needs no key.
 
 ## Next steps
 
-- [Quickstart](https://martineastwood.github.io/cail/guides/quickstart/) for a guided first request
-- [Providers](https://martineastwood.github.io/cail/guides/providers/) for provider setup and capabilities
-- [Agent](https://martineastwood.github.io/cail/guides/agent/) to bundle a model, instructions, and tools
-- [Memory](https://martineastwood.github.io/cail/guides/memory/) to give an agent conversation memory
-- [Advanced usage](https://martineastwood.github.io/cail/guides/advanced/) for middleware, options, and images
+- [Quickstart](https://cail.niminal.dev/guides/quickstart/) for a guided first request
+- [Providers](https://cail.niminal.dev/guides/providers/) for provider setup and capabilities
+- [Agent](https://cail.niminal.dev/guides/agent/) to bundle a model, instructions, and tools
+- [Memory](https://cail.niminal.dev/guides/memory/) to give an agent conversation memory
+- [Advanced usage](https://cail.niminal.dev/guides/advanced/) for middleware, options, and images

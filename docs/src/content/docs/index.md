@@ -7,11 +7,11 @@ hero:
   tagline: Typed C++23 calls to any LLM provider. One model, one generation API.
   actions:
     - text: Install
-      link: /cail/guides/install/
+      link: /guides/install/
       variant: primary
       icon: right-arrow
     - text: Quickstart
-      link: /cail/guides/quickstart/
+      link: /guides/quickstart/
       variant: secondary
       icon: right-arrow
     - text: View on GitHub

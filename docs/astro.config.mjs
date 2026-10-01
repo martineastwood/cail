@@ -2,13 +2,8 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-// Keep the homepage hero links and the deployed base path in one place.
-// GitHub Pages serves project sites under /cail.
-const base = '/cail';
-
 export default defineConfig({
-	site: 'https://martineastwood.github.io',
-	base,
+	site: 'https://cail.niminal.dev',
 	integrations: [
 		starlight({
 			title: 'CAIL',
