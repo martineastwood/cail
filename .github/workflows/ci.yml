@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install clang-format
         run: |
@@ -68,7 +68,7 @@ jobs:
             examples: OFF
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -84,7 +84,7 @@ jobs:
         run: mkdir -p .cache/ccache
 
       - name: Restore compiler cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/ccache
           key: cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -100,7 +100,7 @@ jobs:
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore dependency checkout
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/cail-fetchcontent
           key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
@@ -125,7 +125,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tests-${{ matrix.name }}
           path: |
@@ -153,7 +153,7 @@ jobs:
             directory: build/tsan
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         run: |
@@ -171,7 +171,7 @@ jobs:
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore compiler cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/ccache
           key: cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -180,7 +180,7 @@ jobs:
             cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-
 
       - name: Restore dependency checkout
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/cail-fetchcontent
           key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
@@ -202,7 +202,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tests-${{ matrix.command }}
           path: |
@@ -216,7 +216,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         run: |
@@ -233,7 +233,7 @@ jobs:
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore dependency checkout
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/cail-fetchcontent
           key: cail-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
