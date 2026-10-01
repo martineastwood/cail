@@ -890,7 +890,10 @@ void test_abandon_approval_in_callback() {
                 "lookup",
                 [&](auto response) {
                   response->tool_continuation.reset();
-                  abandoned.set_value(agent.generate("next", options).has_value());
+                  // The probe reserves the conversation until its own response is
+                  // destroyed, so probe and signal in separate statements.
+                  const bool resumed = agent.generate("next", options).has_value();
+                  abandoned.set_value(resumed);
                 },
                 options)
             .has_value(),
@@ -898,17 +901,24 @@ void test_abandon_approval_in_callback() {
   check(first.get(),
         "discarding initial approval releases the conversation before callback returns");
   auto paused = agent.generate("lookup", options);
-  bool released = false;
+  check(paused && paused->tool_continuation, "a paused turn returns a continuation to resume");
+  if (!paused || !paused->tool_continuation) {
+    return;
+  }
+  std::promise<bool> repeated;
+  auto second = repeated.get_future();
   check(agent
             .resume_async(*paused->tool_continuation,
                           {{.call_id = "call", .name = "lookup", .output = "1"}},
                           [&](auto response) {
                             response->tool_continuation.reset();
-                            released = agent.generate("next", options).has_value();
+                            const bool resumed = agent.generate("next", options).has_value();
+                            repeated.set_value(resumed);
                           })
             .has_value(),
         "a resumed turn can be abandoned at its next approval");
-  check(released, "discarding repeated approval releases the conversation before callback returns");
+  check(second.get(),
+        "discarding repeated approval releases the conversation before callback returns");
 }
 
 void test_paused_turn_not_saved() {
