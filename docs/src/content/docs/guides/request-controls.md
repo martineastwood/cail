@@ -70,9 +70,10 @@ Leave an option unset to use the provider's default.
 | `stop_sequences` | Nonempty strings that stop generation when encountered. |
 | `tool_choice` | Whether the model may call tools, must call one, or must call a named tool. |
 
-Choose either `temperature` or `top_p` when tuning sampling. Support can vary by
-model, even within a provider. An endpoint that rejects an option returns a
-provider error; CAIL does not retry by dropping the option.
+Many models work best with either `temperature` or `top_p`, not both tuned at
+once. CAIL lets you set both when you need to; support varies by model and
+provider. An endpoint that rejects an option returns a provider error; CAIL does
+not retry by dropping the option.
 
 OpenAI Responses, including Azure Foundry and OpenCode's Responses adapter, does
 not support `stop_sequences`. CAIL returns `invalid_configuration` before

@@ -4,9 +4,10 @@ description: Configure CAIL's hosted providers, OpenCode services, and local mod
 ---
 
 You write against one generation API, and the provider is a value you pass in.
-Most providers read their API key from a known environment variable, and each
-has a `create_*` function for passing a key, base URL, or extra headers
-explicitly.
+Most providers read their API key from a known environment variable. Each has a
+`create_*` function when you need to pass a key or base URL explicitly. Several
+adapters also accept extra `.headers`; OpenAI's `create_openai` accepts
+`.api_key` and `.base_url` only.
 
 ## OpenAI
 
@@ -150,11 +151,16 @@ auto response = cail::generate_text({
 ```
 
 Set `OPENCODE_API_KEY` before running, or pass `.api_key` to `create_opencode`.
-Choose `OpenCodeService::zen` or `OpenCodeService::go` for the service. CAIL
-supports the `chat_completions`, `responses`, `anthropic_messages`, and
-`gemini` API families. Availability depends on the service and model you
-select. OpenCode's SystemOne decision endpoint uses a separate request format
-and is not available through this text generation provider.
+Choose `OpenCodeService::zen` or `OpenCodeService::go` for the service. Pass
+`.base_url` when you need a custom host, and set `.anthropic_max_tokens` for
+`OpenCodeApiFamily::anthropic_messages` (default 1024). CAIL supports the
+`chat_completions`, `responses`, `anthropic_messages`, and `gemini` API
+families. Availability depends on the service and model you select. OpenCode's
+SystemOne decision endpoint uses a separate request format and is not available
+through this text generation provider.
+
+Use `opencode.embedding_model("your-embedding-model")` for embeddings through
+the same OpenCode credentials.
 
 Every OpenCode request includes the value from `session_id` in
 `x-opencode-session`. Reuse the same ID for requests in one conversation, and
@@ -203,6 +209,10 @@ auto model = cail::create_chat_completions({.endpoint = url, .api_key = key});
 
 Set `.request_session_header` when the endpoint routes requests by a session
 ID; CAIL sends the value from `GenerationRequest::session_id` in that header.
+Set `.session_body` to send the session ID in the JSON body instead. Enable
+`.prompt_cache_key` when the server supports OpenAI-style prompt caching keys.
+Set `.retain_reasoning_content` to `false` when you want reasoning stripped from
+stored assistant messages on follow-up requests (default `true`).
 
 ## Check adapter capabilities
 

@@ -186,7 +186,9 @@ the request, while the full attachments remain in storage.
 Raw history grows without bound, and long histories cost tokens and distract
 the model. Set `keep_last_turns` to send only the most recent user turns.
 Leading system and developer messages always stay, and trimming only shapes
-what is sent: the backend keeps the full history, so nothing is lost:
+what is sent: the backend keeps the full history, so nothing is lost. Use
+`MessageRole::developer` for provider-specific instructions that should stay at
+the top of the window with system messages:
 
 ```cpp
 auto response = agent.generate("Continue.", {.keep_last_turns = 10});
@@ -283,8 +285,11 @@ history.insert(history.end(), response->turn.begin(), response->turn.end());
 
 Share one memory instance between agents that use the same conversation.
 A memory-backed turn rejects a second turn for the same conversation with a
-`memory` error until the first finishes. Wait for the generation completion
-callback before sending the next message. Different conversation IDs can run
+`memory` error until the first finishes. A turn paused for approval stays reserved
+until you finish it through `agent.resume` or discard every copy of its continuation.
+Only the completed turn is saved. See
+[Remember approved tool calls](/guides/tools/#remember-approved-tool-calls).
+Wait for the generation completion callback before sending the next message. Different conversation IDs can run
 concurrently.
 
 The built-in memory stores support concurrent loads, appends, and clears in one

@@ -62,8 +62,9 @@ with `Result<EmbeddingBatch>`, preserving input order. Immediate validation
 errors are returned without invoking the callback. Once started, the operation
 completes its callback once, including on cancellation or provider errors.
 
-Both embedding adapters, OpenAI-compatible and Gemini, support async requests.
-For custom embedding models, check `supports_async()` first. The request keeps
+Built-in embedding models from CAIL providers generally support async requests,
+including OpenAI-compatible presets, Gemini, Anthropic, and OpenCode. For custom
+embedding models, check `supports_async()` first. The request keeps
 the built-in model alive until completion; reference captures in callbacks must
 remain valid. Callbacks may run on a CAIL I/O thread or before the call returns.
 

@@ -13,6 +13,15 @@
 
 namespace cail {
 
+namespace detail {
+struct AgentMemoryTurn {
+  std::shared_ptr<ConversationMemory> memory;
+  std::string id;
+  Message prompt;
+  std::shared_ptr<void> lease;
+};
+} // namespace detail
+
 struct AgentConfig {
   LanguageModel model;
   std::string instructions;
@@ -154,6 +163,57 @@ public:
     return await_turn(std::move(request), std::move(on_event), std::move(options), true);
   }
 
+  [[nodiscard]] Result<GenerationResponse> resume(ToolContinuation& continuation,
+                                                  const std::vector<ToolResult>& results,
+                                                  const std::stop_token& stop = {}) const {
+    return resume_sync(continuation, results, {}, stop);
+  }
+
+  [[nodiscard]] Result<GenerationResponse> resume_stream(ToolContinuation& continuation,
+                                                         const std::vector<ToolResult>& results,
+                                                         const StreamHandler& on_event,
+                                                         const std::stop_token& stop = {}) const {
+    if (!on_event) {
+      return std::unexpected(
+          detail::async_callback_error("Resuming a stream requires an event handler."));
+    }
+    return resume_sync(continuation, results, on_event, stop);
+  }
+
+  [[nodiscard]] Result<void> resume_async(ToolContinuation& continuation,
+                                          const std::vector<ToolResult>& results,
+                                          LanguageModel::GenerationCompletion complete,
+                                          const std::stop_token& stop = {},
+                                          const AsyncOptions& async = {}) const {
+    return resume_callback(continuation, results, {}, std::move(complete), stop, async);
+  }
+
+  [[nodiscard]] Result<void>
+  resume_stream_async(ToolContinuation& continuation, const std::vector<ToolResult>& results,
+                      StreamHandler on_event, LanguageModel::GenerationCompletion complete,
+                      const std::stop_token& stop = {}, const AsyncOptions& async = {}) const {
+    if (!on_event) {
+      return std::unexpected(
+          detail::async_callback_error("Resuming a stream requires an event handler."));
+    }
+    return resume_callback(continuation, results, std::move(on_event), std::move(complete), stop,
+                           async);
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  resume_async(std::shared_ptr<ToolContinuation> continuation, std::vector<ToolResult> results,
+               const std::stop_token& stop = {}, AsyncOptions async = {}) const {
+    return await_resume(std::move(continuation), std::move(results), {}, stop, std::move(async));
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  resume_stream_async(std::shared_ptr<ToolContinuation> continuation,
+                      std::vector<ToolResult> results, StreamHandler on_event,
+                      const std::stop_token& stop = {}, AsyncOptions async = {}) const {
+    return await_resume(std::move(continuation), std::move(results), std::move(on_event), stop,
+                        std::move(async), true);
+  }
+
 private:
   template <typename Input>
   Task<Result<GenerationResponse>> await_turn(Input input, StreamHandler on_event,
@@ -180,6 +240,7 @@ private:
   struct AsyncTurn : std::enable_shared_from_this<AsyncTurn> {
     std::shared_ptr<Agent> agent;
     std::shared_ptr<void> turn;
+    std::shared_ptr<detail::AgentMemoryTurn> memory_turn;
     Message prompt;
     std::string id;
     ToolLoopOptions options;
@@ -188,10 +249,21 @@ private:
 
     void finish(Result<GenerationResponse> result) {
       turn.reset();
+      if (memory_turn && (!result || !result->tool_continuation)) {
+        memory_turn->lease.reset();
+      }
+      memory_turn.reset();
       complete(std::move(result));
     }
 
     void store(Result<GenerationResponse> result) {
+      if (result && result->tool_continuation && agent->memory_ && !id.empty()) {
+        if (!memory_turn) {
+          memory_turn = std::make_shared<detail::AgentMemoryTurn>(detail::AgentMemoryTurn{
+              .memory = agent->memory_, .id = id, .prompt = prompt, .lease = std::move(turn)});
+        }
+        agent->bind_turn(*result->tool_continuation, memory_turn);
+      }
       if (!result || result->tool_continuation || !agent->memory_ || id.empty()) {
         finish(std::move(result));
         return;
@@ -356,8 +428,107 @@ private:
     }
     const auto& id = options.conversation_id.empty() ? conversation_id_ : options.conversation_id;
     auto prompt_message = messages->back();
-    return store_response(memory_, id, prompt_message,
-                          send(GenerationRequest{.messages = std::move(*messages)}, options));
+    auto response = send(GenerationRequest{.messages = std::move(*messages)}, options);
+    if (response && response->tool_continuation && memory_ && !id.empty()) {
+      bind_turn(
+          *response->tool_continuation,
+          std::make_shared<detail::AgentMemoryTurn>(detail::AgentMemoryTurn{
+              .memory = memory_, .id = id, .prompt = prompt_message, .lease = std::move(*turn)}));
+    }
+    return store_response(memory_, id, prompt_message, std::move(response));
+  }
+
+  void bind_turn(ToolContinuation& continuation,
+                 std::shared_ptr<detail::AgentMemoryTurn> turn) const {
+    continuation.loop_->agent_owner = owner_;
+    continuation.loop_->memory_turn = std::move(turn);
+  }
+
+  [[nodiscard]] Result<GenerationResponse> resume_sync(ToolContinuation& continuation,
+                                                       const std::vector<ToolResult>& results,
+                                                       const StreamHandler& on_event,
+                                                       const std::stop_token& stop) const {
+    auto loop = continuation.resume(results, stop, {}, owner_.get());
+    if (!loop) {
+      return std::unexpected(loop.error());
+    }
+    auto turn = (*loop)->memory_turn;
+    auto response = detail::continue_tool_loop(**loop, [&](const GenerationRequest& request) {
+      return on_event ? model_.stream(request, on_event, stop) : model_.generate(request, stop);
+    });
+    if (turn && (!response || !response->tool_continuation)) {
+      response = store_response(turn->memory, turn->id, turn->prompt, std::move(response));
+      turn->lease.reset();
+    }
+    return response;
+  }
+
+  [[nodiscard]] Result<void>
+  resume_callback(ToolContinuation& continuation, const std::vector<ToolResult>& results,
+                  StreamHandler on_event, LanguageModel::GenerationCompletion complete,
+                  const std::stop_token& stop, const AsyncOptions& async) const {
+    if (!complete || (on_event && !async.max_pending_events)) {
+      return std::unexpected(detail::async_callback_error(
+          "Resuming requires a completion handler and a positive stream event limit."));
+    }
+    auto state = std::make_shared<AsyncTurn>();
+    state->agent = std::make_shared<Agent>(*this);
+    state->options.stop = stop;
+    if (on_event) {
+      auto delivery = std::make_shared<detail::StreamDelivery>(std::move(on_event),
+                                                               std::move(complete), async, stop);
+      state->on_event = [delivery](const StreamEvent& event) { delivery->event(event); };
+      state->complete = [delivery](Result<GenerationResponse> result) {
+        delivery->finish(std::move(result));
+      };
+      state->options.stop = delivery->token();
+    } else {
+      state->complete =
+          detail::scheduled_completion<GenerationResponse>(std::move(complete), async);
+    }
+    auto loop = continuation.resume(results, state->options.stop, {}, owner_.get());
+    if (!loop) {
+      return std::unexpected(loop.error());
+    }
+    state->memory_turn = (*loop)->memory_turn;
+    if (state->memory_turn) {
+      state->id = state->memory_turn->id;
+      state->prompt = state->memory_turn->prompt;
+    }
+    auto started =
+        std::make_shared<detail::AsyncToolLoop>(
+            std::move(**loop), model_,
+            [state](Result<GenerationResponse> response) { state->store(std::move(response)); },
+            state->on_event)
+            ->start();
+    if (!started && state->memory_turn) {
+      state->memory_turn->lease.reset();
+    }
+    return started;
+  }
+
+  [[nodiscard]] Task<Result<GenerationResponse>>
+  await_resume(std::shared_ptr<ToolContinuation> continuation, std::vector<ToolResult> results,
+               StreamHandler on_event, const std::stop_token& stop, AsyncOptions async,
+               bool streaming = false) const {
+    return detail::await_result<GenerationResponse>(
+        [agent = *this, continuation = std::move(continuation), results = std::move(results),
+         on_event = std::move(on_event), async = std::move(async),
+         streaming](auto complete, const auto& token, auto callbacks) mutable -> Result<void> {
+          if (!continuation) {
+            return std::unexpected(
+                detail::async_callback_error("Resuming requires a tool continuation."));
+          }
+          if (streaming) {
+            if (!async.schedule) {
+              async.schedule = std::move(callbacks.schedule);
+            }
+            return agent.resume_stream_async(*continuation, results, std::move(on_event),
+                                             std::move(complete), token, async);
+          }
+          return agent.resume_async(*continuation, results, std::move(complete), token, async);
+        },
+        stop);
   }
 
   [[nodiscard]] GenerationRequest prepare(GenerationRequest request) const {
@@ -369,6 +540,7 @@ private:
     return request;
   }
 
+  std::shared_ptr<void> owner_{std::make_shared<int>(0)};
   LanguageModel model_;
   std::string instructions_;
   std::vector<Tool> tools_;

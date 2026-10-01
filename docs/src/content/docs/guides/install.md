@@ -5,7 +5,8 @@ description: Add CAIL to a C++23 project with CMake and OpenSSL.
 
 CAIL is a static C++23 library for calling LLM providers from your application.
 You install it once with CMake, link `cail::cail` in your project, and include the
-headers you need (for example `<cail/generation.hpp>` and `<cail/openai.hpp>`).
+headers you need. Include `<cail/cail.hpp>` for the full API, or narrower headers
+such as `<cail/generate.hpp>` and `<cail/openai.hpp>` for a single provider.
 
 > **CAIL is in alpha.** Interfaces can change between releases. Pin the version you
 > depend on and skim the docs when you upgrade.

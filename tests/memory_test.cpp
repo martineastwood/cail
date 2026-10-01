@@ -330,8 +330,9 @@ void test_agent_memory_keep_last_turns() {
                                : agent.stream_async("third", [](const cail::StreamEvent&) {}, done,
                                                     {.keep_last_turns = 1});
       check(started.has_value(), "a bounded async call starts");
-      if (started)
+      if (started) {
         check(pending.get().has_value(), "a bounded async call succeeds");
+      }
     }
     const auto& sent = client->requests[2].messages;
     check(sent.size() == 4, "a bounded call sends the instructions plus the window");
@@ -617,6 +618,299 @@ void test_attachment_base64() {
   std::filesystem::remove_all(directory);
 }
 
+void test_agent_resume_memory() {
+  for (int mode = 0; mode < 6; ++mode) {
+    auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+    std::vector<cail::GenerationRequest> requests;
+    auto generate = [&](const cail::GenerationRequest& request,
+                        auto) -> cail::Result<cail::GenerationResponse> {
+      requests.push_back(request);
+      if (request.step < 2) {
+        return cail::GenerationResponse{
+            .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}}};
+      }
+      return cail::GenerationResponse{.text = "done"};
+    };
+    auto stream = [&](const cail::GenerationRequest& request, const cail::StreamHandler& event,
+                      auto stop) {
+      auto response = generate(request, stop);
+      if (response && !response->text.empty()) {
+        event(cail::TextDelta{.text = response->text});
+      }
+      return response;
+    };
+    cail::LanguageModel model(
+        generate, stream, {},
+        [&](auto request, auto done, auto stop) -> cail::Result<void> {
+          done(generate(request, stop));
+          return {};
+        },
+        [&](auto request, auto event, auto done, auto stop) -> cail::Result<void> {
+          done(stream(request, event, stop));
+          return {};
+        });
+    auto tool = cail::tool<int, int>("lookup", "Lookup", [](int) { return 1; });
+    cail::Agent agent({.model = model,
+                       .instructions = "system",
+                       .tools = {tool},
+                       .memory = memory,
+                       .conversation_id = "default"});
+    cail::Agent other({.model = model, .memory = memory, .conversation_id = "approval"});
+    const auto options = cail::ToolLoopOptions{.conversation_id = "approval",
+                                               .pause_when = [](const auto&) { return true; }};
+    cail::Result<cail::GenerationResponse> response;
+    if (mode < 2) {
+      response = mode == 0 ? agent.generate(multimodal_message(), options)
+                           : agent.stream(multimodal_message(), [](const auto&) {}, options);
+    } else if (mode < 4) {
+      std::promise<cail::Result<cail::GenerationResponse>> promise;
+      auto future = promise.get_future();
+      auto done = [&](auto value) { promise.set_value(std::move(value)); };
+      check((mode == 2 ? agent.generate_async(multimodal_message(), done, options)
+                       : agent.stream_async(
+                             multimodal_message(), [](const auto&) {}, done, options))
+                .has_value(),
+            "async approval starts");
+      response = future.get();
+    } else {
+      response = cail::run(
+          mode == 4 ? agent.generate_async(multimodal_message(), options)
+                    : agent.stream_async(multimodal_message(), [](const auto&) {}, options));
+    }
+    check(response && response->tool_continuation && memory->load("approval")->empty(),
+          "all agent modes pause without storing an unfinished turn");
+    if (!response || !response->tool_continuation) {
+      continue;
+    }
+    auto continuation = response->tool_continuation;
+    const std::vector<cail::ToolResult> outputs{
+        {.call_id = "call", .name = "lookup", .output = R"({"error":"Approval denied"})"}};
+    check(!agent.generate("overlap", {.conversation_id = "approval"}) && !other.generate("overlap"),
+          "pending approval reserves the conversation across agents");
+    check(!agent.resume(*continuation, {}) && !other.resume(*continuation, outputs) &&
+              !cail::resume_tool_loop(model, *continuation, outputs),
+          "invalid results and the wrong agent leave approval pending");
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    check(!agent.resume(*continuation, outputs, cancelled.get_token()),
+          "pre-cancelled resume preserves the continuation");
+    std::string text;
+    auto event = [&](const cail::StreamEvent& value) {
+      text += std::get<cail::TextDelta>(value).text;
+    };
+    auto resume = [&]() -> cail::Result<cail::GenerationResponse> {
+      if (mode == 0) {
+        return agent.resume(*continuation, outputs);
+      }
+      if (mode == 1) {
+        return agent.resume_stream(*continuation, outputs, event);
+      }
+      if (mode >= 4) {
+        return cail::run(mode == 4 ? agent.resume_async(continuation, outputs)
+                                   : agent.resume_stream_async(continuation, outputs, event));
+      }
+      std::promise<cail::Result<cail::GenerationResponse>> promise;
+      auto future = promise.get_future();
+      auto done = [&](auto value) { promise.set_value(std::move(value)); };
+      check((mode == 2 ? agent.resume_async(*continuation, outputs, done)
+                       : agent.resume_stream_async(*continuation, outputs, event, done))
+                .has_value(),
+            "callback resume starts");
+      return future.get();
+    };
+    response = resume();
+    check(response && response->tool_continuation && memory->load("approval")->empty() &&
+              !other.generate("overlap"),
+          "a second approval keeps the original turn reserved and unsaved");
+    check(!agent.resume(*continuation, outputs), "a consumed continuation cannot resume twice");
+    if (!response || !response->tool_continuation) {
+      continue;
+    }
+    continuation = response->tool_continuation;
+    response = resume();
+    auto stored = memory->load("approval");
+    check(response && !response->tool_continuation && response->steps.size() == 3 &&
+              response->tool_results.size() == 2 && stored && stored->size() == 6,
+          "final approval stores the complete turn once in every execution mode");
+    if (stored && !stored->empty()) {
+      check_multimodal_message(stored->front(), multimodal_message());
+    }
+    check(mode % 2 == 0 || text == "done", "resumed streams deliver final text");
+    check(memory->load("default")->empty(), "resume retains the original conversation override");
+    check(!agent.resume(*continuation, outputs) && memory->load("approval")->size() == 6,
+          "repeated resume cannot append duplicate history");
+    check(agent.generate("follow up", {.conversation_id = "approval"}).has_value() &&
+              requests[3].messages.size() == 8,
+          "a follow-up sees the completed approved turn and instructions once");
+  }
+}
+
+void test_agent_resume_failure() {
+  for (const bool async : {false, true}) {
+    auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+    auto generate = [](const cail::GenerationRequest& request,
+                       auto) -> cail::Result<cail::GenerationResponse> {
+      if (request.step) {
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::transport, .message = "offline"});
+      }
+      return cail::GenerationResponse{
+          .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}}};
+    };
+    cail::LanguageModel model(generate, {}, {},
+                              [generate](auto request, auto done, auto stop) -> cail::Result<void> {
+                                done(generate(request, stop));
+                                return {};
+                              });
+    cail::Agent agent({.model = model,
+                       .tools = {cail::tool<int, int>("lookup", "Lookup", [](int x) { return x; })},
+                       .memory = memory,
+                       .conversation_id = "failed"});
+    auto paused = agent.generate("lookup", {.pause_when = [](const auto&) { return true; }});
+    const std::vector<cail::ToolResult> outputs{
+        {.call_id = "call", .name = "lookup", .output = "1"}};
+    auto response = async ? cail::run(agent.resume_async(paused->tool_continuation, outputs))
+                          : agent.resume(*paused->tool_continuation, outputs);
+    check(!response && response.error().partial_response && memory->load("failed")->empty(),
+          "failed resumes preserve progress and save no partial history");
+    check(agent.generate("next", {.pause_when = [](const auto&) { return true; }}).has_value(),
+          "failed resumes release the conversation reservation");
+  }
+}
+
+void test_agent_resume_lifecycle() {
+  for (const bool cancel : {false, true}) {
+    auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+    cail::LanguageModel::GenerationCompletion pending;
+    std::stop_token provider_stop;
+    auto generate = [](auto, auto) -> cail::Result<cail::GenerationResponse> {
+      return cail::GenerationResponse{
+          .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}}};
+    };
+    cail::LanguageModel model(generate, {}, {},
+                              [&](auto, auto done, auto stop) -> cail::Result<void> {
+                                pending = std::move(done);
+                                provider_stop = stop;
+                                return {};
+                              });
+    cail::Agent agent({.model = model,
+                       .tools = {cail::tool<int, int>("lookup", "Lookup", [](int x) { return x; })},
+                       .memory = memory,
+                       .conversation_id = "active"});
+    auto paused = agent.generate("lookup", {.pause_when = [](const auto&) { return true; }});
+    std::promise<std::function<void()>> scheduled;
+    auto delivery = scheduled.get_future();
+    std::promise<cail::Result<cail::GenerationResponse>> promise;
+    auto future = promise.get_future();
+    std::stop_source stop;
+    auto copied = agent;
+    const std::vector<cail::ToolResult> outputs{
+        {.call_id = "call", .name = "lookup", .output = "1"}};
+    check(copied
+              .resume_async(*paused->tool_continuation, outputs,
+                            [&](auto response) { promise.set_value(std::move(response)); },
+                            stop.get_token(),
+                            {.schedule = [&](auto task) { scheduled.set_value(std::move(task)); }})
+              .has_value(),
+          "an agent copy can resume a pending turn");
+    auto concurrent = std::async(std::launch::async,
+                                 [&] { return agent.resume(*paused->tool_continuation, outputs); });
+    check(!concurrent.get() && !agent.generate("overlap"),
+          "an active resume prevents competing resumes and prompts");
+    if (cancel) {
+      stop.request_stop();
+    }
+    check(provider_stop.stop_requested() == cancel,
+          "resuming forwards cancellation to the provider");
+    pending(cail::GenerationResponse{.text = "done"});
+    pending = {};
+    auto deliver = delivery.get();
+    check(future.wait_for(std::chrono::seconds{0}) != std::future_status::ready,
+          "resumed completion waits for the requested scheduler");
+    check(agent.generate("next", {.pause_when = [](const auto&) { return true; }}).has_value(),
+          "resumes release the conversation before scheduled delivery");
+    deliver();
+    auto result = future.get();
+    check(cancel ? (!result && result.error().code == cail::ErrorCode::cancelled &&
+                    memory->load("active")->empty())
+                 : (result && memory->load("active")->size() == 4),
+          "active cancellation saves nothing while successful resume saves before completion");
+    check(agent.generate("next", {.pause_when = [](const auto&) { return true; }}).has_value(),
+          "completed and cancelled resumes release the conversation before callback delivery");
+  }
+
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  cail::LanguageModel model(
+      [](auto, auto) -> cail::Result<cail::GenerationResponse> {
+        return cail::GenerationResponse{
+            .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}}};
+      },
+      {}, {},
+      [](auto, auto, auto) -> cail::Result<void> {
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::transport, .message = "offline"});
+      });
+  cail::Agent agent({.model = model,
+                     .tools = {cail::tool<int, int>("lookup", "Lookup", [](int x) { return x; })},
+                     .memory = memory,
+                     .conversation_id = "failed"});
+  auto paused = agent.generate("lookup", {.pause_when = [](const auto&) { return true; }});
+  bool called = false;
+  auto failed = agent.resume_async(*paused->tool_continuation,
+                                   {{.call_id = "call", .name = "lookup", .output = "1"}},
+                                   [&](auto) { called = true; });
+  check(!failed && !called && failed.error().partial_response && memory->load("failed")->empty(),
+        "resume initiation errors return progress without invoking completion or saving memory");
+  check(agent.generate("next", {.pause_when = [](const auto&) { return true; }}).has_value(),
+        "initiation errors consume approval and release the conversation");
+  check(!cail::run(agent.resume_async({}, {})),
+        "agent coroutine resume rejects null continuations");
+}
+
+void test_abandon_approval_in_callback() {
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  auto generate = [](auto, auto) -> cail::Result<cail::GenerationResponse> {
+    return cail::GenerationResponse{
+        .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}}};
+  };
+  cail::LanguageModel model(generate, {}, {},
+                            [generate](auto request, auto done, auto stop) -> cail::Result<void> {
+                              done(generate(request, stop));
+                              return {};
+                            });
+  cail::Agent agent({.model = model,
+                     .tools = {cail::tool<int, int>("lookup", "Lookup", [](int x) { return x; })},
+                     .memory = memory,
+                     .conversation_id = "approval"});
+  const auto options = cail::ToolLoopOptions{.pause_when = [](const auto&) { return true; }};
+  std::promise<bool> abandoned;
+  auto first = abandoned.get_future();
+  check(agent
+            .generate_async(
+                "lookup",
+                [&](auto response) {
+                  response->tool_continuation.reset();
+                  abandoned.set_value(agent.generate("next", options).has_value());
+                },
+                options)
+            .has_value(),
+        "async approval can be abandoned inside its callback");
+  check(first.get(),
+        "discarding initial approval releases the conversation before callback returns");
+  auto paused = agent.generate("lookup", options);
+  bool released = false;
+  check(agent
+            .resume_async(*paused->tool_continuation,
+                          {{.call_id = "call", .name = "lookup", .output = "1"}},
+                          [&](auto response) {
+                            response->tool_continuation.reset();
+                            released = agent.generate("next", options).has_value();
+                          })
+            .has_value(),
+        "a resumed turn can be abandoned at its next approval");
+  check(released, "discarding repeated approval releases the conversation before callback returns");
+}
+
 void test_paused_turn_not_saved() {
   auto memory = std::make_shared<cail::InMemoryConversationMemory>();
   cail::LanguageModel model([](auto, auto) -> cail::Result<cail::GenerationResponse> {
@@ -629,13 +923,19 @@ void test_paused_turn_not_saved() {
   auto paused = agent.generate("look up", {.pause_when = [](const auto&) { return true; }});
   check(paused && paused->tool_continuation && memory->load("paused")->empty(),
         "paused turns do not save incomplete tool exchanges");
+  check(!agent.generate("try again"), "paused turns reserve the conversation");
+  paused->tool_continuation.reset();
   check(agent.generate("try again", {.pause_when = [](const auto&) { return true; }}).has_value(),
-        "paused turns release the conversation lease");
+        "discarding a continuation releases the conversation lease");
 }
 
 } // namespace test
 
 int main() {
+  test::test_abandon_approval_in_callback();
+  test::test_agent_resume_lifecycle();
+  test::test_agent_resume_memory();
+  test::test_agent_resume_failure();
   test::test_paused_turn_not_saved();
   test::test_in_memory_conversation();
   test::test_file_conversation();

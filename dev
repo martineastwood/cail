@@ -6,7 +6,10 @@ cd "$ROOT"
 
 BUILD_DIR="${BUILD_DIR:-build/dev}"
 SANITIZER_DIR="${SANITIZER_DIR:-build/asan}"
-JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+JOBS="${JOBS:-4}"
+if command -v ccache >/dev/null 2>&1; then
+  export CMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CXX_COMPILER_LAUNCHER:-ccache}"
+fi
 # CI pins this exact version through pip, so a local mismatch means a surprise
 # failure later. Homebrew's llvm@23 is the same release.
 CLANG_FORMAT_VERSION="${CLANG_FORMAT_VERSION:-23.1.1}"
@@ -57,11 +60,16 @@ Commands:
   format [--fix]        Check formatting (--fix rewrites the files)
   configure [dir]       Configure a build directory
   build [dir] [target]  Build a directory, or one target
-  test [dir] [regex]    Run the CTest suites
-  tidy [--fix]          Run clang-tidy over library sources and tests
-  sanitizer             Build and test with ASan and UBSan
-  thread-sanitizer      Build and test with ThreadSanitizer
-  linux-check           Build examples and run tests with Ubuntu GCC in Docker
+  test [dir] [regex] [--all]
+                        Run tests (excludes packaging; --all includes it)
+  tidy [--fix] [--changed | files...]
+                        Analyze all translation units, changed files, or named files
+  sanitizer [--configure-only]
+                        Build and test with ASan and UBSan
+  thread-sanitizer [--configure-only]
+                        Build and test with ThreadSanitizer
+  linux-check [target] [regex]
+                        Incremental Ubuntu GCC check in Docker (full by default)
   check                 Format check, configure, build, and test
   clean                 Remove the build directories
 
@@ -70,8 +78,8 @@ Extra arguments after a directory are passed to CMake, for example:
 
 Environment:
   BUILD_DIR             Default build directory (build/dev)
-  JOBS                  Parallel job count
-  CAIL_BUILD_EXAMPLES   Build examples during configure (default: ON)
+  JOBS                  Parallel compilation/analysis jobs (default: 4)
+  CAIL_BUILD_EXAMPLES   Build examples during configure (default: OFF)
   CAIL_FETCHCONTENT_BASE_DIR
                         Reuse a shared dependency checkout
 EOF
@@ -112,9 +120,11 @@ cmd_configure() {
   # Reuse a shared dependency checkout so CI and local builds skip the clone.
   [[ -n "${CAIL_FETCHCONTENT_BASE_DIR:-}" ]] &&
     cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
+  [[ -n "${CMAKE_CXX_COMPILER_LAUNCHER:-}" ]] &&
+    cache+=("-DCMAKE_CXX_COMPILER_LAUNCHER=$CMAKE_CXX_COMPILER_LAUNCHER")
   log "configure ($dir)"
   cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}" \
-    -DCAIL_BUILD_EXAMPLES="${CAIL_BUILD_EXAMPLES:-ON}" -DBUILD_TESTING=ON \
+    -DCAIL_BUILD_EXAMPLES="${CAIL_BUILD_EXAMPLES:-OFF}" -DBUILD_TESTING=ON \
     ${cache[@]+"${cache[@]}"} ${1+"$@"}
 }
 
@@ -126,10 +136,23 @@ cmd_build() {
 }
 
 cmd_test() {
-  local dir="${1:-$BUILD_DIR}"
-  local filter="${2:-}"
-  log "test ($dir${filter:+ -R $filter})"
-  ctest --test-dir "$dir" --output-on-failure ${filter:+-R "$filter"}
+  local dir="$BUILD_DIR"
+  local args=(--label-exclude packaging --no-tests=error)
+  if [[ $# -gt 0 && "$1" != --all ]]; then
+    dir="$1"
+    shift
+  fi
+  if [[ $# -gt 0 && "$1" != --all ]]; then
+    args+=(-R "$1")
+    shift
+  fi
+  if [[ "${1:-}" == --all ]]; then
+    args=("${args[@]:2}")
+    shift
+  fi
+  [[ $# -eq 0 ]] || die "usage: ./dev test [dir] [regex] [--all]"
+  log "test ($dir)"
+  ctest --test-dir "$dir" --output-on-failure --output-junit results.xml "${args[@]}"
 }
 
 cmd_tidy() {
@@ -149,6 +172,7 @@ cmd_tidy() {
   if [[ "${1:-}" == "--fix" ]]; then
     args+=(-fix)
     tidy_jobs=1
+    shift
   fi
 
   local sdkroot
@@ -162,24 +186,46 @@ cmd_tidy() {
   fi
 
   local files
-  files="$(tidy_files)"
+  if [[ "${1:-}" == --changed ]]; then
+    [[ $# -eq 1 ]] || die "use --changed or explicit files"
+    local changed
+    changed="$( { git diff --name-only --diff-filter=ACMR HEAD; git diff --name-only --diff-filter=D HEAD -- '*.h' '*.hpp'; git ls-files --others --exclude-standard; } | sort -u)"
+    if printf '%s\n' "$changed" | grep -Eq '^(include|src|tests)/.*\.(h|hpp)$|^(CMakeLists.txt|\.clang-tidy)$'; then
+      files="$(tidy_files)"
+    else
+      files="$(printf '%s\n' "$changed" | grep -E '^(src|tests)/[^/]+\.cpp$' || true)"
+    fi
+  elif [[ $# -gt 0 ]]; then
+    files="$(printf '%s\n' "$@")"
+  else
+    files="$(tidy_files)"
+  fi
+  [[ -n "$files" ]] || { log "tidy (no changed translation units)"; return 0; }
   log "tidy ($(echo "$files" | wc -l | tr -d ' ') translation units)"
   # shellcheck disable=SC2086
   printf '%s\n' $files | xargs -n 1 -P "$tidy_jobs" "$clang_tidy" "${args[@]}"
 }
 
 cmd_sanitizer() {
+  local configure_only=false
+  if [[ "${1:-}" == --configure-only ]]; then
+    configure_only=true
+    shift
+  fi
   log "sanitizer ($SANITIZER_DIR)"
   local flags="${SANITIZER_FLAGS:--fsanitize=address,undefined -fno-omit-frame-pointer -g}"
   local cache=()
   [[ -n "${CAIL_FETCHCONTENT_BASE_DIR:-}" ]] &&
     cache+=("-DFETCHCONTENT_BASE_DIR=$CAIL_FETCHCONTENT_BASE_DIR")
+  [[ -n "${CMAKE_CXX_COMPILER_LAUNCHER:-}" ]] &&
+    cache+=("-DCMAKE_CXX_COMPILER_LAUNCHER=$CMAKE_CXX_COMPILER_LAUNCHER")
   cmake -S . -B "$SANITIZER_DIR" -DCMAKE_BUILD_TYPE=Debug \
     -DCAIL_BUILD_EXAMPLES=OFF -DBUILD_TESTING=ON \
     -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="$flags" \
     ${cache[@]+"${cache[@]}"} "$@"
-  cmake --build "$SANITIZER_DIR" --parallel "$JOBS"
-  ctest --test-dir "$SANITIZER_DIR" --output-on-failure
+  $configure_only && return 0
+  cmd_build "$SANITIZER_DIR"
+  cmd_test "$SANITIZER_DIR" --all
 }
 
 cmd_linux_check() {
@@ -187,29 +233,34 @@ cmd_linux_check() {
   local image="cail-linux-gcc-check"
   local ccache_volume="cail-linux-check-ccache"
   local deps_volume="cail-linux-check-fetchcontent"
+  local build_volume="cail-linux-check-build"
+  [[ $# -le 2 ]] || die "usage: ./dev linux-check [target] [regex]"
 
   log "build Linux GCC check image"
-  docker build --pull -f "$ROOT/ci/linux-gcc.Dockerfile" -t "$image" "$ROOT/ci"
+  docker build -f "$ROOT/ci/linux-gcc.Dockerfile" -t "$image" "$ROOT/ci"
   docker volume create "$ccache_volume" >/dev/null
   docker volume create "$deps_volume" >/dev/null
+  docker volume create "$build_volume" >/dev/null
 
   log "linux-check (Ubuntu 24.04, GCC)"
   docker run --rm \
     --env JOBS="$JOBS" \
+    --env CAIL_BUILD_EXAMPLES="${CAIL_BUILD_EXAMPLES:-ON}" \
     --volume "$ROOT:/src:ro" \
     --volume "$ccache_volume:/root/.cache/ccache" \
     --volume "$deps_volume:/root/.cache/cail-fetchcontent" \
+    --volume "$build_volume:/build" \
     --workdir /src \
     "$image" bash -lc '
       set -euo pipefail
       export CAIL_FETCHCONTENT_BASE_DIR=/root/.cache/cail-fetchcontent
       export CCACHE_MAXSIZE=1G
       export CXX=g++
-      ./dev configure /tmp/cail-linux-gcc -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      ./dev build /tmp/cail-linux-gcc
-      ./dev test /tmp/cail-linux-gcc
+      ./dev configure /build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      ./dev build /build "${1:-}"
+      ./dev test /build "${2:-.*}" --all
       ccache --show-stats
-    '
+    ' bash "$@"
 }
 
 cmd_check() {

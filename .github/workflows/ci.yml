@@ -41,6 +41,10 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_MAXSIZE: 1G
     strategy:
       fail-fast: false
       matrix:
@@ -103,32 +107,50 @@ jobs:
           restore-keys: |
             cail-deps-${{ runner.os }}-
 
-      - name: Configure, build, and test
+      - name: Configure
         env:
           CXX: ${{ matrix.cxx }}
           CAIL_BUILD_EXAMPLES: ${{ matrix.examples }}
-          CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
-          CCACHE_DIR: ${{ runner.temp }}/ccache
-          CCACHE_MAXSIZE: 1G
-        run: |
-          mkdir -p .cache/cail-fetchcontent
-          ./dev configure -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          ./dev build
-          ./dev test
-          ccache --show-stats
+        run: ./dev configure -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: ./dev build
+
+      - name: Test
+        run: ./dev test --all
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.name }}
+          path: |
+            build/dev/results.xml
+            build/dev/Testing/Temporary/
+          if-no-files-found: ignore
 
   sanitizer:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_MAXSIZE: 1G
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: ASan and UBSan
             command: sanitizer
+            directory: build/asan
           - name: ThreadSanitizer
             command: thread-sanitizer
+            directory: build/tsan
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -165,15 +187,28 @@ jobs:
           restore-keys: |
             cail-deps-${{ runner.os }}-
 
-      - name: Build and test with sanitizers
-        env:
-          CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
-          CCACHE_DIR: ${{ runner.temp }}/ccache
-          CCACHE_MAXSIZE: 1G
-        run: |
-          mkdir -p .cache/cail-fetchcontent
-          ./dev ${{ matrix.command }} -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          ccache --show-stats
+      - name: Configure sanitizers
+        run: ./dev ${{ matrix.command }} --configure-only -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: ./dev build ${{ matrix.directory }}
+
+      - name: Test
+        run: ./dev test ${{ matrix.directory }} --all
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.command }}
+          path: |
+            ${{ matrix.directory }}/results.xml
+            ${{ matrix.directory }}/Testing/Temporary/
+          if-no-files-found: ignore
 
   tidy:
     name: clang-tidy

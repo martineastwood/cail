@@ -760,6 +760,9 @@ void test_tool_loop_partial_progress() {
       .tool_calls = {{.id = "call", .name = "missing", .arguments = "{}"}},
   });
   check(!finished, "round limit fails");
+  if (finished) {
+    return;
+  }
   auto error = loop.with_progress(finished.error());
   check(error.code == cail::ErrorCode::tool_loop_limit && error.partial_response &&
             error.partial_response->steps.size() == 1 && error.partial_response->turn.size() == 1 &&
@@ -776,6 +779,10 @@ void test_tool_loop_partial_progress() {
         "tool step begins");
   stop.request_stop();
   auto accepted = cancelled.accept_tool(std::string{"done"});
+  check(!accepted, "cancelled tool acceptance fails");
+  if (accepted) {
+    return;
+  }
   auto cancellation = cancelled.with_progress(accepted.error());
   check(cancellation.code == cail::ErrorCode::cancelled &&
             cancellation.partial_response->tool_results.size() == 1 &&

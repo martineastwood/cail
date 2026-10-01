@@ -163,11 +163,109 @@ auto resumed = co_await cail::resume_tool_loop_async(
 Use `resume_stream_tool_loop_async` with the shared pointer and an event handler
 to await a resumed stream. These overloads retain the continuation until completion.
 
-If you use agent memory, a paused response does not append the unfinished turn.
-The standalone resume functions do not save agent memory. For approval workflows,
-use the agent's `GenerationRequest` overload with application-managed history,
-then append the final response's `turn` once the workflow finishes. See
-[Memory](/guides/memory/) for manually managed conversations.
+## Remember approved tool calls
+
+You can pause an agent for approval and keep the completed exchange in conversation
+memory. Use the agent's `resume` method after collecting each batch of results:
+
+```cpp
+#include <cail/cail.hpp>
+
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
+
+struct WeatherQuery { std::string location; };
+struct WeatherReport { std::string location; int temperature_fahrenheit{}; };
+
+int main() {
+  auto weather = cail::tool<WeatherQuery, WeatherReport>(
+      "weather", "Fetch weather for a location.", [](const WeatherQuery& query) {
+        return WeatherReport{query.location, 72}; // Replace with your weather service.
+      });
+  cail::Agent agent({
+      .model = cail::openai("gpt-6-luna"),
+      .instructions = "Help with travel plans. If a tool result contains an error, explain it without inventing weather.",
+      .tools = {weather},
+      .memory = std::make_shared<cail::FileConversationMemory>("conversations"),
+      .conversation_id = "traveler-42",
+  });
+  auto result = agent.generate("Use the weather tool to fetch the weather for Paris.",
+                              {.pause_when = [](const cail::ToolCall&) { return true; }});
+  while (result && result->tool_continuation) {
+    std::vector<cail::ToolResult> outputs;
+    for (const auto& call : result->tool_calls) {
+      std::cout << call.name << " " << call.arguments << "\nApprove? [y/N] ";
+      std::string answer;
+      std::getline(std::cin, answer);
+      cail::Result<std::string> output = std::string{R"({"error":"Approval denied"})"};
+      if (answer == "y") output = weather.execute(call, {});
+      if (!output) {
+        std::cerr << output.error().message << '\n';
+        return 1;
+      }
+      outputs.push_back({call.id, call.name, *output});
+    }
+    result = agent.resume(*result->tool_continuation, outputs);
+  }
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    return 1;
+  }
+  std::cout << result->text << '\n';
+  auto follow_up = agent.generate("What city did I ask about?");
+  if (!follow_up) {
+    std::cerr << follow_up.error().message << '\n';
+    return 1;
+  }
+  std::cout << follow_up->text << '\n';
+}
+```
+
+The initial prompt, tool calls, tool results, and final answer are saved together
+when the turn finishes successfully. The follow-up can recall that exchange,
+including rejected calls. Build and run this example from a checkout:
+
+```sh
+cmake -S . -B build -DCAIL_BUILD_EXAMPLES=ON
+cmake --build build --target cail_openai_approval_memory
+export OPENAI_API_KEY="your-api-key"
+./build/cail_openai_approval_memory
+```
+
+A second approval pauses the same turn again without
+saving it early. Conversation ID overrides and attachments stay with the original
+turn.
+
+While approval is pending, another prompt for the same conversation returns a
+`memory` error. Finish the turn or release every copy of its continuation before
+starting another prompt. Discarding a continuation abandons the unfinished turn
+without saving it. Calling `clear` on the memory store does not abandon approval.
+
+Resume memory-backed continuations through the agent that started them, or a
+copy of that agent. Standalone resume functions and a separately constructed agent
+return `invalid_configuration`. Invalid results and pre-cancelled tokens leave
+approval pending, so you can correct the results and retry. Once results are
+accepted, a failed or cancelled resume consumes the continuation and releases the
+conversation. Failed generation saves no partial turn. An async memory write
+already in progress may finish after cancellation. Inspect `error().partial_response`
+before repeating tool actions.
+
+Use `agent.resume_stream(continuation, outputs, on_event)` to stream the next steps.
+The callback forms are `agent.resume_async(continuation, outputs, on_complete)` and
+`agent.resume_stream_async(continuation, outputs, on_event, on_complete)`. Pass a stop
+token and `AsyncOptions` after the completion handler to cancel or schedule delivery.
+To await either form, pass the shared continuation pointer:
+
+```cpp
+auto resumed = co_await agent.resume_async(result->tool_continuation, outputs);
+```
+
+Continuations remain process-local. File memory saves completed turns, so pending
+approval cannot survive a restart. The agent's `GenerationRequest` overload still
+uses application-managed history and saves nothing automatically. See
+[Memory](/guides/memory/) for conversation setup and history limits.
 
 ## Manage each round yourself
 

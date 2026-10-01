@@ -184,16 +184,23 @@ struct ToolLoopOptions {
 
 namespace detail {
 class ToolLoop;
-}
+struct AgentMemoryTurn;
+} // namespace detail
 
 // Process-local, single-use state. Retains request settings and tool handlers.
 class ToolContinuation {
 public:
   [[nodiscard]] Result<std::shared_ptr<detail::ToolLoop>>
-  resume(const std::vector<ToolResult>& results, const std::stop_token& stop, AsyncOptions async);
+  resume(const std::vector<ToolResult>& results, const std::stop_token& stop, AsyncOptions async) {
+    return resume(results, stop, std::move(async), nullptr);
+  }
 
 private:
   friend class detail::ToolLoop;
+  friend class Agent;
+  [[nodiscard]] Result<std::shared_ptr<detail::ToolLoop>>
+  resume(const std::vector<ToolResult>& results, const std::stop_token& stop, AsyncOptions async,
+         const void* agent_owner);
   explicit ToolContinuation(std::shared_ptr<detail::ToolLoop> loop) : loop_(std::move(loop)) {}
   std::mutex mutex_;
   std::shared_ptr<detail::ToolLoop> loop_;
@@ -306,6 +313,8 @@ namespace detail {
 
 class ToolLoop {
 public:
+  std::shared_ptr<void> agent_owner;
+  std::shared_ptr<AgentMemoryTurn> memory_turn;
   ToolLoop(GenerationRequest initial, std::vector<Tool> registered, ToolLoopOptions settings)
       : request(std::move(initial)), options(std::move(settings)), tools(std::move(registered)) {
     request.tools.clear();
@@ -663,6 +672,7 @@ private:
       response = std::unexpected(loop_.with_progress(response.error()));
     }
     finished_ = true;
+    loop_.memory_turn.reset();
     complete_(std::move(response));
   }
 
@@ -680,11 +690,16 @@ private:
 
 inline Result<std::shared_ptr<detail::ToolLoop>>
 ToolContinuation::resume(const std::vector<ToolResult>& results, const std::stop_token& stop,
-                         AsyncOptions async) {
+                         AsyncOptions async, const void* agent_owner) {
   std::lock_guard lock(mutex_);
   if (!loop_) {
     return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                  .message = "The tool continuation has already been resumed."});
+  }
+  if (loop_->agent_owner && loop_->agent_owner.get() != agent_owner) {
+    return std::unexpected(
+        Error{.code = ErrorCode::invalid_configuration,
+              .message = "Resume this continuation through its originating agent."});
   }
   if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());

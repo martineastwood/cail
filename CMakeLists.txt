@@ -162,6 +162,9 @@ if(CAIL_BUILD_EXAMPLES)
     add_executable(cail_openai_agent examples/openai_agent.cpp)
     target_link_libraries(cail_openai_agent PRIVATE cail::cail)
 
+    add_executable(cail_openai_approval_memory examples/openai_approval_memory.cpp)
+    target_link_libraries(cail_openai_approval_memory PRIVATE cail::cail)
+
     add_executable(cail_openai_memory examples/openai_memory.cpp)
     target_link_libraries(cail_openai_memory PRIVATE cail::cail)
 
@@ -285,10 +288,12 @@ if(BUILD_TESTING)
             "-DCAIL_GENERATOR=${CMAKE_GENERATOR}"
             "-DCAIL_CONFIGURATION=$<CONFIG>"
             "-DCAIL_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DCAIL_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}"
             "-DCAIL_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
             "-DCAIL_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install-smoke.cmake"
     )
+    set_tests_properties(cail_install_smoke PROPERTIES LABELS packaging)
 endif()
 
 if(MSVC)

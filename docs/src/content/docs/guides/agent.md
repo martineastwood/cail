@@ -177,7 +177,7 @@ a tool call ID. Use `GenerationRequest` when you manage the full history yoursel
 Call `generate_async` with a prompt and completion callback:
 
 ```cpp
-auto started = weather_agent.generate_async(
+auto started = agent.generate_async(
     "What should I pack for Paris?",
     [](cail::Result<cail::GenerationResponse> result) {
         if (result) std::cout << result->text << '\n';

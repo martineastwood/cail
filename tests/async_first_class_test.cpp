@@ -426,6 +426,11 @@ void test_async_tool_pause_and_recovery() {
   auto pending = memory_result.get();
   check(pending && pending->tool_continuation && memory->load("paused")->empty(),
         "async paused turns are not saved");
+  bool overlapping_callback = false;
+  check(!agent.generate_async("try again", [&](auto) { overlapping_callback = true; }) &&
+            !overlapping_callback,
+        "async paused turns reserve the conversation without invoking completion");
+  pending->tool_continuation.reset();
   std::promise<cail::Result<cail::GenerationResponse>> second_pause;
   auto second_result = second_pause.get_future();
   check(agent
@@ -433,8 +438,8 @@ void test_async_tool_pause_and_recovery() {
                             [&](auto response) { second_pause.set_value(std::move(response)); },
                             {.pause_when = [](const auto&) { return true; }})
             .has_value(),
-        "second paused turn starts");
-  check(second_result.get().has_value(), "async paused turns release the conversation lease");
+        "discarding an async continuation releases the conversation lease");
+  check(second_result.get().has_value(), "another turn can pause after abandoning approval");
 
   for (const bool streaming : {false, true}) {
     cail::Result<cail::GenerationResponse> paused;

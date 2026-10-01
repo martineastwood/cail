@@ -28,7 +28,8 @@ you use. The coroutine API exposes Asio, so model headers still include it.
 
 - Include the provider header you need, such as `<cail/openai.hpp>`.
 - Include `<cail/schema.hpp>` when generating a schema from a C++ type.
-- Include `<cail/tool.hpp>` when using `make_tool<T>()` or typed executable tools.
+- Include `<cail/tool.hpp>` when using `make_tool<Input>(name, description)` or
+  `tool<Input, Out>(...)`.
 - Include `<cail/cail.hpp>` for the complete API.
 
 For large projects, precompiled headers can reduce the remaining header costs.

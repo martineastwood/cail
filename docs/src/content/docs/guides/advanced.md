@@ -139,8 +139,8 @@ remaining tools from starting after an active handler returns.
 
 `generate_object_async<T>` completes with `Result<T>` and reports the same
 refusal, incomplete response, and JSON decoding errors as `generate_object<T>`.
-Check `embedding_model.supports_async()` before async embedding calls with a
-custom model.
+Built-in embedding models generally support async; check
+`embedding_model.supports_async()` before async calls with a custom model.
 
 Async agent text prompts and user messages load memory before starting the request and save successful
 turns before completion. Memory loads and writes run asynchronously, including
@@ -265,6 +265,36 @@ if (response) {
 For Chat Completions providers, request options are added to the request body.
 Message, content-part, and tool-definition options are added to their matching
 history entries. Use only fields accepted by the provider you selected.
+
+### Continue an OpenAI Responses thread
+
+OpenAI Responses, Azure Foundry Responses deployments, and OpenCode's Responses
+adapter can chain turns with a provider continuation token. After a successful
+call, copy `response->continuation_token` onto the next request and send only the
+new user messages:
+
+```cpp
+auto model = cail::openai("gpt-6-luna");
+auto first = model.generate(cail::GenerationRequest{
+    .messages = {cail::Message{
+        .content = {cail::TextPart{.text = "What is CAIL?"}},
+    }},
+});
+if (!first || !first->continuation_token) {
+    return 1;
+}
+
+auto follow_up = model.generate(cail::GenerationRequest{
+    .continuation_token = first->continuation_token,
+    .messages = {cail::Message{
+        .content = {cail::TextPart{.text = "Give one more detail."}},
+    }},
+});
+```
+
+The tool loop forwards continuation tokens across follow-up model steps.
+Anthropic, OpenRouter, and Chat Completions adapters return
+`invalid_configuration` when you set `continuation_token`.
 
 ## Send an image
 

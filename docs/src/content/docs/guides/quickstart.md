@@ -20,7 +20,7 @@ CAIL supports.
 The simplest call is `cail::generate_text`:
 
 ```cpp
-#include <cail/generation.hpp>
+#include <cail/cail.hpp>
 #include <iostream>
 
 int main()

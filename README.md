@@ -13,6 +13,8 @@ files in [`docs/`](docs/). Run the site locally with `npm run dev` in `docs/`.
 Set an API key in your environment and send a prompt:
 
 ```cpp
+#include <cail/cail.hpp>
+
 auto response = cail::generate_text({
     .model = cail::openai("gpt-6-luna"),
     .system = "You are a concise assistant.",
@@ -218,7 +220,8 @@ against unbounded tool calls.
 
 Set `tool_loop.recover_tool_errors = true` to send argument and execution errors
 back to the model. Set `tool_loop.pause_when` to inspect a batch before tools run,
-then supply results through `resume_tool_loop`. See [Tools](docs/src/content/docs/guides/tools.md)
+then supply results through `resume_tool_loop`, or `agent.resume` to save a completed
+turn in agent memory. See [Tools](docs/src/content/docs/guides/tools.md)
 for approval, rejection, streaming, and async examples.
 
 ## Agents
@@ -511,8 +514,10 @@ dedicated vector database when your collection grows.
 
 ## Providers
 
-Most providers read their API key from a known environment variable, and each has a
-`create_*` function for passing a key, base URL, or extra headers explicitly.
+Most providers read their API key from a known environment variable. Each has a
+`create_*` function when you need to pass a key or base URL explicitly. Several
+adapters also accept extra `.headers`; OpenAI's `create_openai` accepts `.api_key`
+and `.base_url` only.
 
 ### OpenAI
 
@@ -635,11 +640,13 @@ auto response = cail::generate_text({
 ```
 
 Set `OPENCODE_API_KEY` before running, or pass `.api_key` to `create_opencode`. Choose
-`OpenCodeService::zen` or `OpenCodeService::go` for the service. CAIL supports the
-`chat_completions`, `responses`, `anthropic_messages`, and `gemini` API families.
-Availability depends on the service and model you select. OpenCode's SystemOne decision
-endpoint uses a separate request format and is not available through this text generation
-provider.
+`OpenCodeService::zen` or `OpenCodeService::go` for the service. Pass `.base_url` for a
+custom host and `.anthropic_max_tokens` for `OpenCodeApiFamily::anthropic_messages`
+(default 1024). CAIL supports the `chat_completions`, `responses`, `anthropic_messages`,
+and `gemini` API families. Availability depends on the service and model you select.
+OpenCode's SystemOne decision endpoint uses a separate request format and is not available
+through this text generation provider. Use `opencode.embedding_model(...)` for embeddings
+through the same credentials.
 
 Every OpenCode request includes the value from `session_id` in `x-opencode-session`. Reuse
 the same ID for requests in one conversation, and choose the ID in your application.
@@ -924,7 +931,7 @@ Set the provider's API key in your environment, then run the binaries from `./bu
 
 | Provider | Key | Examples |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY` | `cail_openai_prompt`, `cail_openai_stream`, `cail_openai_generate_object`, `cail_openai_tool_call`, `cail_openai_agent`, `cail_openai_embed`, `cail_openai_create`, `cail_openai_multimodal_memory` |
+| OpenAI | `OPENAI_API_KEY` | `cail_openai_prompt`, `cail_openai_stream`, `cail_openai_generate_object`, `cail_openai_tool_call`, `cail_openai_agent`, `cail_openai_embed`, `cail_openai_create`, `cail_openai_multimodal_memory`, `cail_openai_approval_memory` |
 | OpenRouter | `OPENROUTER_API_KEY` | `cail_openrouter_prompt`, `cail_openrouter_stream`, `cail_openrouter_object` |
 | Anthropic | `ANTHROPIC_API_KEY` | `cail_anthropic_prompt`, `cail_anthropic_stream`, `cail_anthropic_object`, `cail_anthropic_tool_call` |
 | Gemini | `GEMINI_API_KEY` | `cail_gemini_prompt`, `cail_gemini_stream`, `cail_gemini_object`, `cail_gemini_tool_call`, `cail_gemini_embed` |
