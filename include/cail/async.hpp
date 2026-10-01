@@ -128,10 +128,14 @@ private:
         } else if (result_) {
           result = std::move(result_);
           result_.reset();
-          if (error_)
-            *result = std::unexpected(*error_);
-          else if (token().stop_requested())
-            *result = std::unexpected(generation_cancelled_error());
+          if (error_ || token().stop_requested()) {
+            auto error = error_.value_or(generation_cancelled_error());
+            if (*result && !(*result)->steps.empty())
+              error.partial_response = std::make_shared<GenerationResponse>(std::move(**result));
+            else if (!*result)
+              error.partial_response = result->error().partial_response;
+            *result = std::unexpected(std::move(error));
+          }
         } else {
           scheduled_ = false;
           return;

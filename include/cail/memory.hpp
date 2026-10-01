@@ -23,29 +23,24 @@
 
 namespace cail {
 
-// Bounds a message list to the last keep_last messages, preserving leading
-// system and developer messages and dropping tool results whose paired tool
-// call was trimmed away.
-inline void trim_messages(std::vector<Message>& messages, std::size_t keep_last) {
-  std::size_t prefix = 0;
-  while (prefix < messages.size() && (messages[prefix].role == MessageRole::system ||
-                                      messages[prefix].role == MessageRole::developer)) {
-    ++prefix;
-  }
-  if (messages.size() <= prefix + keep_last) {
+// Keep the newest user turns, including all following assistant and tool
+// messages, while preserving leading system and developer messages.
+// Zero keeps the full history.
+inline void trim_turns(std::vector<Message>& messages, std::size_t keep_last) {
+  if (!keep_last)
     return;
-  }
-  messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(prefix),
-                 messages.end() - static_cast<std::ptrdiff_t>(keep_last));
-  std::unordered_set<std::string> retained_calls;
-  for (const auto& message : messages) {
-    for (const auto& call : message.tool_calls) {
-      retained_calls.insert(call.id);
+  auto prefix = messages.begin();
+  while (prefix != messages.end() &&
+         (prefix->role == MessageRole::system || prefix->role == MessageRole::developer))
+    ++prefix;
+  std::size_t turns = 0;
+  for (auto cursor = messages.end(); cursor != prefix;) {
+    --cursor;
+    if (cursor->role == MessageRole::user && ++turns == keep_last) {
+      messages.erase(prefix, cursor);
+      return;
     }
   }
-  std::erase_if(messages, [&retained_calls](const Message& message) {
-    return message.role == MessageRole::tool && !retained_calls.contains(message.tool_call_id);
-  });
 }
 
 namespace detail {

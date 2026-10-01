@@ -252,8 +252,8 @@ auto second = weather_agent.generate("What about shoes?");
 
 `FileConversationMemory` stores one JSON file per conversation id, so the second prompt can
 use the first prompt and response, including any tool calls and results. The history is
-loaded before each prompt and appended after a successful call. Set `keep_last_messages`
-on the options to limit how much history is sent.
+loaded before each prompt and appended after a successful call. Set `keep_last_turns`
+on the options to limit how many previous turns are sent.
 
 If your history lives in a database or another store, implement the
 `cail::ConversationMemory` interface and pass it as `.memory` instead. It provides

@@ -752,9 +752,44 @@ void test_async_transport_retries() {
         "async retry reports cancellation");
 }
 
+void test_tool_loop_partial_progress() {
+  cail::detail::ToolLoop loop({}, {}, {.max_rounds = 0});
+  auto finished = loop.begin_step(cail::GenerationResponse{
+      .text = "Calling a tool",
+      .usage = cail::TokenUsage{.input_tokens = 3, .output_tokens = 2},
+      .tool_calls = {{.id = "call", .name = "missing", .arguments = "{}"}},
+  });
+  check(!finished, "round limit fails");
+  auto error = loop.with_progress(finished.error());
+  check(error.code == cail::ErrorCode::tool_loop_limit && error.partial_response &&
+            error.partial_response->steps.size() == 1 && error.partial_response->turn.size() == 1 &&
+            error.partial_response->total_usage->input_tokens == 3,
+        "round limit preserves model progress and usage");
+
+  std::stop_source stop;
+  cail::detail::ToolLoop cancelled({}, {}, {.stop = stop.get_token()});
+  check(cancelled
+            .begin_step(cail::GenerationResponse{
+                .tool_calls = {{.id = "call", .name = "write", .arguments = "{}"}},
+            })
+            .has_value(),
+        "tool step begins");
+  stop.request_stop();
+  auto accepted = cancelled.accept_tool(std::string{"done"});
+  auto cancellation = cancelled.with_progress(accepted.error());
+  check(cancellation.code == cail::ErrorCode::cancelled &&
+            cancellation.partial_response->tool_results.size() == 1 &&
+            cancellation.partial_response->turn.size() == 2,
+        "cancellation preserves successful tool output");
+  cail::detail::ToolLoop empty({}, {}, {});
+  check(!empty.with_progress(cail::generation_cancelled_error()).partial_response,
+        "failure before a model response has no partial progress");
+}
+
 } // namespace test
 
 int main() {
+  test::test_tool_loop_partial_progress();
   test::test_length_constraints();
   test::test_constraint_validation();
   test::test_control_character_json();

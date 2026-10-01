@@ -81,14 +81,23 @@ public:
           .message = "The document embedding dimensions do not match the store.",
       });
     }
-    dimensions_ = batch->dimensions;
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-      if (batch->embeddings[i].values.size() != dimensions_) {
+    if (batch->embeddings.size() != documents.size() || batch->dimensions == 0) {
+      return std::unexpected(Error{
+          .code = ErrorCode::provider_response,
+          .message = "The embedding provider returned an invalid batch size or dimensions.",
+      });
+    }
+    for (const auto& embedding : batch->embeddings) {
+      if (embedding.values.size() != batch->dimensions ||
+          embedding.dimensions != batch->dimensions) {
         return std::unexpected(Error{
             .code = ErrorCode::provider_response,
             .message = "The embedding provider returned a vector with the wrong length.",
         });
       }
+    }
+    dimensions_ = batch->dimensions;
+    for (std::size_t i = 0; i < documents.size(); ++i) {
       const auto& id = documents[i].id;
       const auto existing = std::ranges::find_if(
           entries_, [&](const Entry& entry) { return entry.document.id == id; });

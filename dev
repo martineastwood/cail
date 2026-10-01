@@ -62,6 +62,7 @@ Commands:
   tidy [--fix]          Run clang-tidy over the test translation units
   sanitizer             Build and test with ASan and UBSan
   thread-sanitizer      Build and test with ThreadSanitizer
+  linux-check           Build tests and examples with Ubuntu GCC in Docker
   check                 Format check, configure, build, and test
   clean                 Remove the build directories
 
@@ -182,6 +183,34 @@ cmd_sanitizer() {
   ctest --test-dir "$SANITIZER_DIR" --output-on-failure
 }
 
+cmd_linux_check() {
+  command -v docker >/dev/null 2>&1 || die "docker is required for linux-check"
+  local image="cail-linux-gcc-check"
+  local ccache_volume="cail-linux-check-ccache"
+  local deps_volume="cail-linux-check-fetchcontent"
+
+  log "build Linux GCC check image"
+  docker build --pull -f "$ROOT/ci/linux-gcc.Dockerfile" -t "$image" "$ROOT/ci"
+  docker volume create "$ccache_volume" >/dev/null
+  docker volume create "$deps_volume" >/dev/null
+
+  log "linux-check (Ubuntu 24.04, GCC)"
+  docker run --rm \
+    --volume "$ROOT:/src:ro" \
+    --volume "$ccache_volume:/root/.cache/ccache" \
+    --volume "$deps_volume:/root/.cache/cail-fetchcontent" \
+    --workdir /src \
+    "$image" bash -lc '
+      set -euo pipefail
+      export CAIL_FETCHCONTENT_BASE_DIR=/root/.cache/cail-fetchcontent
+      export CCACHE_MAXSIZE=1G
+      export CXX=g++
+      ./dev configure /tmp/cail-linux-gcc -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      ./dev build /tmp/cail-linux-gcc
+      ccache --show-stats
+    '
+}
+
 cmd_check() {
   cmd_format
   cmd_configure "$BUILD_DIR"
@@ -207,6 +236,7 @@ case "$command" in
   test) cmd_test "$@" ;;
   tidy) cmd_tidy "$@" ;;
   sanitizer) cmd_sanitizer "$@" ;;
+  linux-check) cmd_linux_check "$@" ;;
   thread-sanitizer)
     SANITIZER_DIR="${THREAD_SANITIZER_DIR:-build/tsan}" \
       SANITIZER_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" cmd_sanitizer "$@"

@@ -219,8 +219,7 @@ private:
     Result<void> generate(std::vector<Message> history) {
       if (options.stop.stop_requested())
         return std::unexpected(generation_cancelled_error());
-      if (options.keep_last_messages)
-        trim_messages(history, options.keep_last_messages);
+      trim_turns(history, options.keep_last_turns);
       history.push_back(prompt);
       auto completion = [self = shared_from_this()](Result<GenerationResponse> result) {
         self->store(std::move(result));
@@ -309,8 +308,7 @@ private:
       auto history = detail::memory_operation([&] { return memory_->load(id); });
       if (!history)
         return std::unexpected(history.error());
-      if (options.keep_last_messages)
-        trim_messages(*history, options.keep_last_messages);
+      trim_turns(*history, options.keep_last_turns);
       messages = std::move(*history);
     }
     messages.push_back(std::move(message));

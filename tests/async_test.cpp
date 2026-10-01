@@ -218,6 +218,10 @@ void test_tool_loop() {
     }
     check(result && !*result && result->error().code == cail::ErrorCode::cancelled && executed == 1,
           "cancellation prevents remaining tools from executing in both loops");
+    check(result && !*result && result->error().partial_response &&
+              result->error().partial_response->tool_results.size() == 1 &&
+              result->error().partial_response->turn.size() == 2,
+          "both loops retain the tool result produced before cancellation");
   }
 }
 
@@ -286,6 +290,25 @@ void test_inline_and_failures() {
   const auto result = failed.get();
   check(started && !result && result.error().code == cail::ErrorCode::transport,
         "follow-up initiation errors reach the completion");
+  check(!result && result.error().partial_response &&
+            result.error().partial_response->steps.size() == 1 &&
+            result.error().partial_response->tool_results.size() == 1,
+        "async follow-up failures preserve completed model and tool work");
+}
+
+void test_stream_failure_preserves_progress() {
+  std::stop_source stop;
+  std::optional<cail::Result<cail::GenerationResponse>> received;
+  auto delivery = std::make_shared<cail::detail::StreamDelivery>(
+      [](const cail::StreamEvent&) {}, [&](auto result) { received = std::move(result); },
+      cail::AsyncOptions{}, stop.get_token());
+  auto partial = std::make_shared<cail::GenerationResponse>();
+  partial->tool_results.push_back({.call_id = "call", .name = "write", .output = "done"});
+  stop.request_stop();
+  delivery->finish(std::unexpected(
+      cail::Error{.code = cail::ErrorCode::cancelled, .partial_response = partial}));
+  check(received && !*received && received->error().partial_response == partial,
+        "async stream delivery retains partial progress on cancellation");
 }
 
 void test_embeddings() {
@@ -450,6 +473,7 @@ void test_async_multimodal_memory() {
 } // namespace test
 
 int main() {
+  test::test_stream_failure_preserves_progress();
   test::test_adapters();
   test::test_tool_loop();
   test::test_inline_and_failures();

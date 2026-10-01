@@ -17,8 +17,6 @@ env:
   # Keep this in step with CLANG_FORMAT_VERSION in ./dev. The pip package is
   # version exact, so CI and local runs cannot drift apart.
   CLANG_FORMAT_VERSION: 23.1.1
-  # CAIL needs CMake 3.31, which is newer than the runner images ship.
-  CMAKE_VERSION: 3.31.10
 
 jobs:
   format:
@@ -72,17 +70,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev ${{ matrix.packages }}
+          sudo apt-get install -y --no-install-recommends ccache ninja-build libssl-dev ${{ matrix.packages }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install openssl@3
+        run: brew install ccache openssl@3
+
+      - name: Prepare compiler cache
+        run: mkdir -p "$RUNNER_TEMP/ccache"
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-${{ github.ref }}-
+            cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-
 
       - name: Install CMake
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
-            "cmake==$CMAKE_VERSION"
+            "cmake==$(cat ci/cmake-version.txt)"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore dependency checkout
@@ -98,11 +108,14 @@ jobs:
           CXX: ${{ matrix.cxx }}
           CAIL_BUILD_EXAMPLES: ${{ matrix.examples }}
           CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 1G
         run: |
           mkdir -p .cache/cail-fetchcontent
-          ./dev configure
+          ./dev configure -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           ./dev build
           ./dev test
+          ccache --show-stats
 
   sanitizer:
     name: ${{ matrix.name }}
@@ -123,14 +136,26 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++ libssl-dev
+          sudo apt-get install -y --no-install-recommends ccache ninja-build g++ libssl-dev
+
+      - name: Prepare compiler cache
+        run: mkdir -p "$RUNNER_TEMP/ccache"
 
       - name: Install CMake
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
-            "cmake==$CMAKE_VERSION"
+            "cmake==$(cat ci/cmake-version.txt)"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-${{ github.ref }}-
+            cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-
 
       - name: Restore dependency checkout
         uses: actions/cache@v4
@@ -143,9 +168,12 @@ jobs:
       - name: Build and test with sanitizers
         env:
           CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 1G
         run: |
           mkdir -p .cache/cail-fetchcontent
-          ./dev ${{ matrix.command }}
+          ./dev ${{ matrix.command }} -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          ccache --show-stats
 
   tidy:
     name: clang-tidy
@@ -166,7 +194,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
-            "cmake==$CMAKE_VERSION"
+            "cmake==$(cat ci/cmake-version.txt)"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - name: Restore dependency checkout

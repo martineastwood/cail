@@ -153,9 +153,9 @@ struct ToolLoopOptions {
   std::stop_token stop;
   // Conversation id for agent memory; overrides the agent's default.
   std::string conversation_id;
-  // Send at most this many trailing history messages (leading system and
-  // developer messages are always kept). Zero sends the full history.
-  std::size_t keep_last_messages{0};
+  // Send this many previous user turns, including their assistant/tool exchanges.
+  // Leading system/developer messages stay. Zero sends the full history.
+  std::size_t keep_last_turns{0};
 };
 
 namespace detail {
@@ -273,24 +273,35 @@ public:
   }
 
   [[nodiscard]] Result<bool> begin_step(Result<GenerationResponse> response) {
+    if (response) {
+      result = *response;
+      turn.push_back(Message{
+          .role = MessageRole::assistant,
+          .content = response->text.empty()
+                         ? std::vector<ContentPart>{}
+                         : std::vector<ContentPart>{TextPart{.text = response->text}},
+          .tool_calls = response->tool_calls,
+          .provider_options = response->provider_options,
+      });
+      steps.push_back(GenerationStep{.step = request.step,
+                                     .text = response->text,
+                                     .reasoning = response->reasoning,
+                                     .finish_reason = response->finish_reason,
+                                     .raw_finish_reason = response->raw_finish_reason,
+                                     .usage = response->usage,
+                                     .tool_calls = response->tool_calls});
+      if (response->usage) {
+        if (!total_usage)
+          total_usage.emplace();
+        add_usage(*total_usage, *response->usage);
+      }
+    }
     if (auto middleware = run_after_step(request, response); !middleware)
       return std::unexpected(middleware.error());
     if (options.stop.stop_requested())
       return std::unexpected(generation_cancelled_error());
     if (!response)
       return std::unexpected(response.error());
-    steps.push_back(GenerationStep{.step = request.step,
-                                   .text = response->text,
-                                   .reasoning = response->reasoning,
-                                   .finish_reason = response->finish_reason,
-                                   .raw_finish_reason = response->raw_finish_reason,
-                                   .usage = response->usage,
-                                   .tool_calls = response->tool_calls});
-    if (response->usage) {
-      if (!total_usage)
-        total_usage.emplace();
-      add_usage(*total_usage, *response->usage);
-    }
     bool stopped = false;
     if (options.stop_when) {
       try {
@@ -316,7 +327,6 @@ public:
     };
     if (stopped || response->status != GenerationStatus::completed ||
         response->tool_calls.empty()) {
-      turn.push_back(std::move(assistant));
       response->steps = std::move(steps);
       response->total_usage = total_usage;
       response->turn = std::move(turn);
@@ -351,7 +361,6 @@ public:
       follow_up.messages = request.messages;
       follow_up.messages.push_back(assistant);
     }
-    turn.push_back(std::move(assistant));
     calls = std::move(response->tool_calls);
     tool_index = 0;
     return false;
@@ -371,8 +380,6 @@ public:
   }
 
   [[nodiscard]] Result<void> accept_tool(Result<std::string> output) {
-    if (options.stop.stop_requested())
-      return std::unexpected(generation_cancelled_error());
     if (!output)
       return std::unexpected(output.error());
     const auto& call = calls[tool_index];
@@ -383,6 +390,8 @@ public:
     follow_up.messages.push_back(message);
     turn.push_back(std::move(message));
     ++tool_index;
+    if (options.stop.stop_requested())
+      return std::unexpected(generation_cancelled_error());
     return {};
   }
 
@@ -405,6 +414,18 @@ public:
     }
     advance();
     return false;
+  }
+
+  [[nodiscard]] Error with_progress(Error error) const {
+    if (!steps.empty() || !turn.empty()) {
+      auto partial = result;
+      partial.steps = steps;
+      partial.total_usage = total_usage;
+      partial.tool_results = tool_results;
+      partial.turn = turn;
+      error.partial_response = std::make_shared<GenerationResponse>(std::move(partial));
+    }
+    return error;
   }
 
   ToolContext tool_context() const {
@@ -435,10 +456,10 @@ template <typename Send>
   ToolLoop loop(std::move(request), tools, std::move(options));
   while (true) {
     if (loop.options.stop.stop_requested())
-      return std::unexpected(generation_cancelled_error());
+      return std::unexpected(loop.with_progress(generation_cancelled_error()));
     auto finished = loop.accept(send(loop.request));
     if (!finished)
-      return std::unexpected(finished.error());
+      return std::unexpected(loop.with_progress(finished.error()));
     if (*finished)
       return std::move(loop.result);
   }
@@ -528,6 +549,8 @@ private:
   }
 
   void finish(Result<GenerationResponse> response) {
+    if (!response)
+      response = std::unexpected(loop_.with_progress(response.error()));
     finished_ = true;
     complete_(std::move(response));
   }

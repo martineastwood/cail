@@ -7,7 +7,8 @@ This page is for **contributors** working in the CAIL repository. If you only
 use CAIL from your own application, follow [Install](/guides/install/) instead.
 
 The `./dev` script wraps configure, build, test, formatting, and static
-analysis, so you run the same commands locally that CI runs.
+analysis. Use `./dev linux-check` to compile in Ubuntu with GCC when your
+regular build uses a different compiler, such as AppleClang on macOS.
 
 ## Full validation
 
@@ -37,6 +38,21 @@ server, and `cail_install_smoke` builds a consumer against the installed
 package.
 
 Run `ctest --test-dir build/dev -N` to list the available suites.
+
+## Check the Linux GCC build
+
+On macOS, `./dev check` uses AppleClang. To catch compiler errors that only
+appear with the Linux toolchain, run:
+
+```sh
+./dev linux-check
+```
+
+This command requires Docker. It configures Ubuntu 24.04 with GCC and the same
+CMake 3.31.10 release used by CI, then builds the test and example targets
+without running the tests. Docker volumes keep the compiler and
+dependency caches between runs. Remove them with
+`docker volume rm cail-linux-check-ccache cail-linux-check-fetchcontent`.
 
 ## Formatting and analysis
 

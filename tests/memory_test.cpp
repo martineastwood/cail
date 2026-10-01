@@ -81,48 +81,50 @@ void test_file_conversation() {
   std::filesystem::remove_all(directory);
 }
 
-void test_trim_messages() {
-  cail::ToolCall call{.id = "call-1", .name = "count", .arguments = "{}"};
-  std::vector<cail::Message> messages = {
-      cail::Message{.role = cail::MessageRole::system, .content = {cail::TextPart{.text = "S"}}},
-      cail::Message{.content = {cail::TextPart{.text = "u1"}}},
-      cail::Message{.role = cail::MessageRole::assistant, .tool_calls = {call}},
-      cail::Message{.role = cail::MessageRole::tool, .tool_call_id = "call-1"},
-      cail::Message{.content = {cail::TextPart{.text = "u2"}}},
-      cail::Message{.role = cail::MessageRole::assistant,
-                    .content = {cail::TextPart{.text = "a2"}}},
+void test_trim_turns() {
+  const std::vector<cail::Message> original = {
+      {.role = cail::MessageRole::system, .content = {cail::TextPart{.text = "system"}}},
+      {.role = cail::MessageRole::developer, .content = {cail::TextPart{.text = "developer"}}},
+      {.content = {cail::TextPart{.text = "old"}}},
+      {.role = cail::MessageRole::assistant, .content = {cail::TextPart{.text = "old answer"}}},
+      {.content = {cail::TextPart{.text = "new"},
+                   cail::ImagePart{.bytes = "image", .mime_type = "image/png"},
+                   cail::PdfPart{.bytes = "pdf", .filename = "report.pdf"}}},
+      {.role = cail::MessageRole::assistant,
+       .tool_calls = {{.id = "one", .name = "count", .arguments = "{}"},
+                      {.id = "two", .name = "count", .arguments = "{}"}}},
+      {.role = cail::MessageRole::tool, .tool_call_id = "one"},
+      {.role = cail::MessageRole::tool, .tool_call_id = "two"},
+      {.role = cail::MessageRole::assistant,
+       .tool_calls = {{.id = "three", .name = "count", .arguments = "{}"}}},
+      {.role = cail::MessageRole::tool, .tool_call_id = "three"},
+      {.role = cail::MessageRole::assistant, .content = {cail::TextPart{.text = "new answer"}}},
   };
-
-  cail::trim_messages(messages, 4);
-  check(messages.size() == 5 && messages.front().role == cail::MessageRole::system &&
-            messages.back().role == cail::MessageRole::assistant,
-        "trimming keeps the system prefix plus the requested trailing messages");
-
-  messages = {
-      cail::Message{.role = cail::MessageRole::system, .content = {cail::TextPart{.text = "S"}}},
-      cail::Message{.content = {cail::TextPart{.text = "u1"}}},
-      cail::Message{.role = cail::MessageRole::assistant, .tool_calls = {call}},
-      cail::Message{.role = cail::MessageRole::tool, .tool_call_id = "call-1"},
-      cail::Message{.content = {cail::TextPart{.text = "u2"}}},
-      cail::Message{.role = cail::MessageRole::assistant,
-                    .content = {cail::TextPart{.text = "a2"}}},
-  };
-  cail::trim_messages(messages, 3);
-  check(messages.size() == 3, "trimming drops evicted messages");
-  check(messages[0].role == cail::MessageRole::system &&
-            std::get<cail::TextPart>(messages[0].content.front()).text == "S",
-        "the leading system message survives trimming");
-  check(messages[1].role == cail::MessageRole::user &&
-            std::get<cail::TextPart>(messages[1].content.front()).text == "u2",
-        "trimming keeps the newest messages");
-  check(std::none_of(
-            messages.begin(), messages.end(),
-            [](const cail::Message& message) { return message.role == cail::MessageRole::tool; }),
-        "trimming drops tool results whose tool call was evicted");
-
-  cail::trim_messages(messages, 0);
-  check(messages.size() == 1 && messages.front().role == cail::MessageRole::system,
-        "a zero window keeps only the system prefix");
+  for (const auto limit : {0u, 2u, 10u}) {
+    auto messages = original;
+    cail::trim_turns(messages, limit);
+    check(*cail::to_json(messages) == *cail::to_json(original),
+          "zero or a sufficient turn limit keeps full history");
+  }
+  auto messages = original;
+  cail::trim_turns(messages, 1);
+  auto expected = original;
+  expected.erase(expected.begin() + 2, expected.begin() + 4);
+  check(*cail::to_json(messages) == *cail::to_json(expected),
+        "trimming keeps the prefix, user attachments, and every tool round intact");
+  messages.push_back({.content = {cail::TextPart{.text = "next"}}});
+  messages.push_back(
+      {.role = cail::MessageRole::assistant, .content = {cail::TextPart{.text = "next answer"}}});
+  cail::trim_turns(messages, 1);
+  check(messages.size() == 4 && messages[2].content.size() == 1 &&
+            std::get<cail::TextPart>(messages[2].content.front()).text == "next",
+        "trimming removes an older turn with all its attachments and tool exchanges");
+  std::vector<cail::Message> empty;
+  cail::trim_turns(empty, 1);
+  check(empty.empty(), "empty history stays empty");
+  messages.resize(2);
+  cail::trim_turns(messages, 1);
+  check(messages.size() == 2, "instruction-only history stays intact");
 }
 
 void test_agent_memory() {
@@ -281,36 +283,67 @@ void test_agent_memory_explicit_requests_bypass_memory() {
   check(stored && stored->empty(), "an explicit request loads and stores nothing");
 }
 
-void test_agent_memory_keep_last_messages() {
-  auto client = std::make_shared<ScriptedClient>(std::vector<cail::GenerationResponse>{
-      cail::GenerationResponse{.text = "one"},
-      cail::GenerationResponse{.text = "two"},
-      cail::GenerationResponse{.text = "three"},
-  });
-  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
-  cail::Agent agent({
-      .model = cail::LanguageModel(
-          [client](const cail::GenerationRequest& request, std::stop_token stop) {
-            return client->generate(request, std::move(stop));
-          }),
-      .instructions = "Be concise.",
-      .memory = memory,
-      .conversation_id = "user-42",
-  });
+void test_agent_memory_keep_last_turns() {
+  for (int mode = 0; mode < 4; ++mode) {
+    auto client = std::make_shared<ScriptedClient>(std::vector<cail::GenerationResponse>{
+        cail::GenerationResponse{.text = "one"},
+        cail::GenerationResponse{.text = "two"},
+        cail::GenerationResponse{.text = "three"},
+    });
+    auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+    cail::Agent agent({
+        .model = cail::LanguageModel(
+            [client](const cail::GenerationRequest& request, std::stop_token stop) {
+              return client->generate(request, std::move(stop));
+            },
+            [client](const cail::GenerationRequest& request, const cail::StreamHandler& handler,
+                     std::stop_token stop) { return client->stream(request, handler, stop); },
+            {},
+            [client](const cail::GenerationRequest& request, auto complete,
+                     std::stop_token stop) -> cail::Result<void> {
+              complete(client->generate(request, stop));
+              return {};
+            },
+            [client](const cail::GenerationRequest& request, const cail::StreamHandler& handler,
+                     auto complete, std::stop_token stop) -> cail::Result<void> {
+              complete(client->stream(request, handler, stop));
+              return {};
+            }),
+        .instructions = "Be concise.",
+        .memory = memory,
+        .conversation_id = "user-42",
+    });
 
-  check(agent.generate("first").has_value(), "the first turn succeeds");
-  check(agent.generate("second").has_value(), "the second turn succeeds");
-  check(agent.generate("third", {.keep_last_messages = 2}).has_value(), "a bounded call succeeds");
-  const auto& sent = client->requests[2].messages;
-  check(sent.size() == 4, "a bounded call sends the instructions plus the window");
-  check(sent[1].role == cail::MessageRole::user &&
-            std::get<cail::TextPart>(sent[1].content.front()).text == "second",
-        "the window keeps the oldest retained messages");
-  check(sent[2].role == cail::MessageRole::assistant &&
-            std::get<cail::TextPart>(sent[2].content.front()).text == "two",
-        "the window keeps complete turns");
-  auto stored = memory->load("user-42");
-  check(stored && stored->size() == 6, "trimming shapes what is sent, not what is stored");
+    check(agent.generate("first").has_value(), "the first turn succeeds");
+    check(agent.generate("second").has_value(), "the second turn succeeds");
+    if (mode == 0) {
+      check(agent.generate("third", {.keep_last_turns = 1}).has_value(), "a bounded call succeeds");
+    } else if (mode == 1) {
+      check(agent.stream("third", [](const cail::StreamEvent&) {}, {.keep_last_turns = 1})
+                .has_value(),
+            "a bounded stream succeeds");
+    } else {
+      std::promise<cail::Result<cail::GenerationResponse>> completed;
+      auto pending = completed.get_future();
+      auto done = [&](auto result) { completed.set_value(std::move(result)); };
+      auto started = mode == 2 ? agent.generate_async("third", done, {.keep_last_turns = 1})
+                               : agent.stream_async("third", [](const cail::StreamEvent&) {}, done,
+                                                    {.keep_last_turns = 1});
+      check(started.has_value(), "a bounded async call starts");
+      if (started)
+        check(pending.get().has_value(), "a bounded async call succeeds");
+    }
+    const auto& sent = client->requests[2].messages;
+    check(sent.size() == 4, "a bounded call sends the instructions plus the window");
+    check(sent[1].role == cail::MessageRole::user &&
+              std::get<cail::TextPart>(sent[1].content.front()).text == "second",
+          "the window keeps the oldest retained messages");
+    check(sent[2].role == cail::MessageRole::assistant &&
+              std::get<cail::TextPart>(sent[2].content.front()).text == "two",
+          "the window keeps complete turns");
+    auto stored = memory->load("user-42");
+    check(stored && stored->size() == 6, "trimming shapes what is sent, not what is stored");
+  }
 }
 
 void test_agent_memory_stream() {
@@ -468,7 +501,7 @@ void test_multimodal_agent_memory() {
       check(client->requests.back().messages.size() == 6,
             "follow-up replays the full multimodal turn");
       check_multimodal_message(client->requests.back().messages[1], message);
-      check(resumed.generate("Continue", {.keep_last_messages = 2}).has_value(),
+      check(resumed.generate("Continue", {.keep_last_turns = 1}).has_value(),
             "multimodal history can be trimmed");
       const auto& trimmed = client->requests.back().messages;
       check(trimmed.size() == 4 &&
@@ -589,13 +622,13 @@ void test_attachment_base64() {
 int main() {
   test::test_in_memory_conversation();
   test::test_file_conversation();
-  test::test_trim_messages();
+  test::test_trim_turns();
   test::test_agent_memory();
   test::test_agent_memory_conversation_ids();
   test::test_agent_memory_tool_rounds();
   test::test_agent_memory_failures_store_nothing();
   test::test_agent_memory_explicit_requests_bypass_memory();
-  test::test_agent_memory_keep_last_messages();
+  test::test_agent_memory_keep_last_turns();
   test::test_agent_memory_stream();
   test::test_multimodal_agent_memory();
   test::test_multimodal_input_validation();

@@ -126,7 +126,7 @@ generation failures store no new attachments. Async calls load history and
 save successful turns without blocking your caller. Cancellation stops queued
 memory work, but a write already running may finish. Callback delivery errors
 do not roll back a saved turn. Conversation overrides,
-`keep_last_messages`, tools, and cancellation work the same way as for text prompts.
+`keep_last_turns`, tools, and cancellation work the same way as for text prompts.
 
 For a remote store, you can override `load_async`, `append_async`, and
 `clear_async` on `ConversationMemory`. Each returns `Result<void>` to report
@@ -184,16 +184,23 @@ provider's input limits. Trimming a message drops all of its attachments from
 the request, while the full attachments remain in storage.
 
 Raw history grows without bound, and long histories cost tokens and distract
-the model. Set `keep_last_messages` to send only the most recent messages.
+the model. Set `keep_last_turns` to send only the most recent user turns.
 Leading system and developer messages always stay, and trimming only shapes
 what is sent: the backend keeps the full history, so nothing is lost:
 
 ```cpp
-auto response = agent.generate("Continue.", {.keep_last_messages = 20});
+auto response = agent.generate("Continue.", {.keep_last_turns = 10});
 ```
 
-Trailing tool results are kept together with the tool call that requested
-them, so providers never see an unpaired result.
+A turn starts with a user message and includes every assistant reply and tool
+exchange until the next user message. The limit counts previous turns; your
+current prompt is added afterward. Set it to `0` to send the full history.
+
+Trimming removes whole turns, including their attachments, tool calls, and tool
+results. It does not limit tokens or the number of messages within a turn.
+
+`keep_last_turns` replaces `keep_last_messages`: update your calls to use a turn
+count when upgrading.
 
 ## Bypass memory for one call
 
@@ -266,7 +273,7 @@ history.insert(history.end(), response->turn.begin(), response->turn.end());
 - A memory backend is not synchronized across threads. Give each thread its
   own agent and backend, or guard shared backends yourself.
 - `FileConversationMemory` rewrites the conversation file on every append, so
-  very long conversations get slower to append to over time. `keep_last_messages`
+  very long conversations get slower to append to over time. `keep_last_turns`
   bounds what is sent, not what is stored, so the file keeps growing for the life
   of the conversation. Call `clear` when you want to start over.
 - Compaction such as LLM-generated rolling summaries is not built in yet. You

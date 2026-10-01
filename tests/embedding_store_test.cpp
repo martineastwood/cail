@@ -156,9 +156,43 @@ void test_embedding_store_dimension_mismatch() {
         "search rejects a query whose dimensions do not match the stored documents");
 }
 
+void test_embedding_store_rejects_malformed_batches() {
+  int mode = 0;
+  cail::EmbeddingStore store(
+      cail::EmbeddingModel{[&mode](const std::vector<std::string>& inputs,
+                                   std::stop_token) -> cail::Result<cail::EmbeddingBatch> {
+        cail::EmbeddingBatch batch{.dimensions = 2};
+        for (const auto& input : inputs)
+          batch.embeddings.push_back({.values = store_vector_for(input), .dimensions = 2});
+        if (mode == 1)
+          batch.embeddings.pop_back();
+        if (mode == 2)
+          batch.embeddings.push_back({.values = {1, 0}, .dimensions = 2});
+        if (mode == 3)
+          batch.embeddings.back().values.clear();
+        if (mode == 4)
+          batch.embeddings.back().dimensions = 3;
+        if (mode == 5)
+          batch.dimensions = 0;
+        return batch;
+      }});
+  check(store.add({{.id = "cat", .text = "cat"}}).has_value(), "seed store");
+  for (mode = 1; mode <= 5; ++mode) {
+    const auto added = store.add({{.id = "cat", .text = "car"}, {.id = "new", .text = "car"}});
+    check(!added && store.size() == 1, "malformed batches do not add documents");
+    const int saved = mode;
+    mode = 0;
+    const auto results = store.search("cat");
+    check(results && results->front().document.text == "cat" && results->front().score == 1,
+          "malformed batches do not replace existing documents");
+    mode = saved;
+  }
+}
+
 } // namespace test
 
 int main() {
+  test::test_embedding_store_rejects_malformed_batches();
   test::test_embedding_store_search();
   test::test_embedding_store_upsert_and_clear();
   test::test_embedding_store_empty_and_errors();

@@ -4,4 +4,5 @@ compile_commands.json
 CMakeUserPresets.json
 ROADMAP.md
 AGENTS.md
+!/AGENTS.md
 .DS_Store

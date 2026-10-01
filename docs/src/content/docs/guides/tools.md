@@ -207,6 +207,37 @@ For manually managed requests, use `LanguageModel::stream_async` or
 `stream_tool_loop_async`, or `agent.stream_async(input, on_event, complete, options)`. The same `max_rounds`, `stop_when`, and middleware
 options apply.
 
+## Inspect a failed run
+
+You can inspect completed work when a tool loop fails:
+
+```cpp
+auto response = cail::generate_text({
+    .model = cail::openai("gpt-6-luna"),
+    .prompt = "Fetch the weather for Paris.",
+    .tools = {weather_tool},
+});
+if (!response) {
+    std::cerr << response.error().message << '\n';
+    if (const auto& partial = response.error().partial_response) {
+        for (const auto& tool : partial->tool_results)
+            std::cout << tool.name << ": " << tool.output << '\n';
+    }
+}
+```
+
+`partial_response` includes completed model `steps`, reported `total_usage`,
+successful `tool_results`, and the messages in `turn`. It is absent when no model
+response was received. Blocking, streaming, callback, and coroutine tool loops
+provide the same progress information.
+
+A failed run can have already performed tool actions. Inspect its results before
+retrying. Partial turns can contain unanswered tool calls, so resolve those calls
+before using the messages as conversation history. Failed agent calls do not save
+partial turns to memory automatically. Progress does not include unfinished
+streamed responses or a resumable checkpoint.
+
+
 ## Next steps
 
 - [Streaming](/guides/streaming/) for the full event list
