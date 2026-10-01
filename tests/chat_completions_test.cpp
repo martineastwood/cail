@@ -1,4 +1,6 @@
+#include "detail/chat_completions.hpp"
 #include "test_support.hpp"
+#include <cail/tool.hpp>
 
 #include <cail/chat_completions.hpp>
 

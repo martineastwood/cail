@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cail/error.hpp>
-#include <cail/schema.hpp>
+#include <cail/schema_types.hpp>
 
 #include <algorithm>
 #include <map>

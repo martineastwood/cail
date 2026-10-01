@@ -1,3 +1,5 @@
+#include "detail/anthropic.hpp"
+#include "detail/gemini.hpp"
 #include "test_support.hpp"
 
 #include <future>

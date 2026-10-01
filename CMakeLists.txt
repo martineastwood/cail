@@ -77,26 +77,38 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(magic_enum)
 
-add_library(cail INTERFACE)
+add_library(cail STATIC
+    src/anthropic.cpp
+    src/chat_completions.cpp
+    src/embeddings.cpp
+    src/foundry.cpp
+    src/gemini.cpp
+    src/http.cpp
+    src/opencode.cpp
+    src/openai.cpp
+    src/openai_responses_wire.cpp
+)
 add_library(cail::cail ALIAS cail)
 
-target_compile_features(cail INTERFACE cxx_std_23)
-target_compile_options(cail INTERFACE "$<$<PLATFORM_ID:Darwin>:-fexperimental-library>")
+target_compile_features(cail PUBLIC cxx_std_23)
+target_compile_options(cail PUBLIC "$<$<PLATFORM_ID:Darwin>:-fexperimental-library>")
 # Glaze creates glaze::asio dynamically, so carry its build requirements here
 # and reattach the target from the installed package config.
-target_include_directories(cail INTERFACE
+target_include_directories(cail PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     "$<BUILD_INTERFACE:$<TARGET_PROPERTY:glaze::asio,INTERFACE_INCLUDE_DIRECTORIES>>"
 )
-target_compile_definitions(cail INTERFACE
+target_compile_definitions(cail PUBLIC
     "$<BUILD_INTERFACE:$<TARGET_PROPERTY:glaze::asio,INTERFACE_COMPILE_DEFINITIONS>>"
 )
-target_link_libraries(cail INTERFACE
+target_link_libraries(cail PUBLIC
     glaze::glaze
     "$<BUILD_INTERFACE:$<TARGET_PROPERTY:glaze::asio,INTERFACE_LINK_LIBRARIES>>"
     magic_enum::magic_enum
 )
+
+target_include_directories(cail PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 set(CAIL_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/cail")
 configure_package_config_file(
@@ -234,6 +246,7 @@ if(BUILD_TESTING)
         set(target "cail_${name}_test")
         add_executable("${target}" "tests/${name}_test.cpp")
         target_link_libraries("${target}" PRIVATE cail::cail)
+        target_include_directories("${target}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
         add_test(NAME "cail_${name}" COMMAND "${target}")
     endfunction()
 
@@ -256,6 +269,7 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_executable(cail_local_http_test tests/local_http_test.cpp)
         target_link_libraries(cail_local_http_test PRIVATE cail::cail)
+        target_include_directories(cail_local_http_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
         add_test(NAME cail_local_http
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_http_server.py"
                 "$<TARGET_FILE:cail_local_http_test>")
@@ -275,5 +289,5 @@ if(BUILD_TESTING)
 endif()
 
 if(MSVC)
-    target_compile_options(cail INTERFACE /Zc:preprocessor)
+    target_compile_options(cail PUBLIC /Zc:preprocessor)
 endif()

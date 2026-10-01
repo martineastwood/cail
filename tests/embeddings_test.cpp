@@ -1,3 +1,5 @@
+#include "detail/embeddings.hpp"
+#include "detail/gemini.hpp"
 #include "test_support.hpp"
 
 #include <cail/anthropic.hpp>

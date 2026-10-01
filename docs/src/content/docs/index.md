@@ -21,7 +21,7 @@ hero:
 ---
 
 <div class="landing-shell not-content">
-  <p class="landing-lede">CAIL is a header-only C++23 SDK. Write a generation request once and run it against OpenAI, Anthropic, Gemini, OpenRouter, Mistral, Azure Foundry, Charm Hyper, Ollama Cloud, OpenCode, or your own local server. Streaming, structured outputs, tools, agents with memory, embeddings, and local file or PDF attachments use the same provider-neutral API.</p>
+  <p class="landing-lede">CAIL is a C++23 SDK with a static library. Write a generation request once and run it against OpenAI, Anthropic, Gemini, OpenRouter, Mistral, Azure Foundry, Charm Hyper, Ollama Cloud, OpenCode, or your own local server. Streaming, structured outputs, tools, agents with memory, embeddings, and local file or PDF attachments use the same provider-neutral API.</p>
 
   <section class="landing-terminal" aria-labelledby="landing-terminal-title">
     <div class="landing-terminal-bar">
@@ -95,8 +95,8 @@ std::cout &lt;&lt; response-&gt;text;</code></pre>
       </article>
       <article class="landing-card">
         <span class="landing-card-index">04</span>
-        <h3>Header-only</h3>
-        <p>Add the include directory, link OpenSSL, and build. Glaze and magic_enum are pulled in at configure time.</p>
+        <h3>Build once, reuse</h3>
+        <p>Install CAIL with CMake and link <code>cail::cail</code> in your application. Include the provider headers you need.</p>
       </article>
     </div>
   </section>

@@ -1,28 +1,39 @@
 ---
 title: Compile time
-description: How CAIL's header-only design affects your project's build times.
+description: Keep CAIL build times manageable in your C++ project.
 ---
 
-CAIL is header-only, so each translation unit that includes it also parses
-Glaze, Asio, and OpenSSL. This page shows what that costs and the two changes
-that give most of the time back.
+You can compile CAIL once and reuse it across your application's source files.
+Link the static library and include the provider header you use:
 
-Measured on an Apple M1 Pro with AppleClang 17, best of three runs:
+```cmake
+find_package(cail 0.3 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE cail::cail)
+```
 
-| Included header | `-O0` | `-O2` |
-| --- | --- | --- |
-| `<cail/error.hpp>` | 0.1 s | 0.1 s |
-| `<cail/generation.hpp>` | 1.2 s | 1.2 s |
-| `<cail/openai.hpp>` | 6.7 s | 6.8 s |
-| `<cail/cail.hpp>` | 8.2 s | 8.2 s |
+```cpp
+#include <cail/openai.hpp>
 
-The optimization level barely matters, because parsing the dependency headers
-dominates. Two things follow:
+auto model = cail::openai("gpt-6-luna");
+```
 
-- Include the provider header you use rather than `<cail/cail.hpp>`, which
-  saves about 1.5 s per translation unit.
-- If several translation units call CAIL, give the project a precompiled header
-  or a unity build, which is where the rest of the time comes back.
+Build CAIL with the same compiler and compatible build settings as your
+application. A clean build compiles the library first; subsequent application
+builds reuse it until its sources or build configuration change.
+
+Typed JSON, schema generation, and typed tools still compile for the C++ types
+you use. The coroutine API exposes Asio, so model headers still include it.
+
+## Choose your headers
+
+- Include the provider header you need, such as `<cail/openai.hpp>`.
+- Include `<cail/schema.hpp>` when generating a schema from a C++ type.
+- Include `<cail/tool.hpp>` when using `make_tool<T>()` or typed executable tools.
+- Include `<cail/cail.hpp>` for the complete API.
+
+For large projects, precompiled headers can reduce the remaining header costs.
+Measure a representative clean build and an incremental edit before choosing
+additional build optimizations.
 
 ## Related pages
 

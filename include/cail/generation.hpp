@@ -1,6 +1,7 @@
 #pragma once
 
-#include <cail/schema.hpp>
+#include <cail/error.hpp>
+#include <cail/schema_types.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -75,15 +76,6 @@ struct PdfPart {
 };
 
 using ContentPart = std::variant<TextPart, ImagePart, PdfPart>;
-
-template <typename Arguments>
-[[nodiscard]] ToolDefinition make_tool(std::string name, std::string description) {
-  return ToolDefinition{
-      .name = std::move(name),
-      .description = std::move(description),
-      .parameters = schema<Arguments>(),
-  };
-}
 
 struct Message {
   MessageRole role{MessageRole::user};

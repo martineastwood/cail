@@ -1,11 +1,13 @@
 #pragma once
 
-#include <glaze/ext/glaze_asio.hpp>
-
+#if defined(GLZ_USE_BOOST_ASIO) || !__has_include(<asio.hpp>)
+#include <boost/asio.hpp>
 namespace cail {
-#if defined(GLZ_USING_BOOST_ASIO)
 namespace asio = boost::asio;
+}
 #else
+#include <asio.hpp>
+namespace cail {
 namespace asio = ::asio;
+}
 #endif
-} // namespace cail

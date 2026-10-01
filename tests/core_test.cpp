@@ -1,7 +1,7 @@
+#include "detail/strict_schema.hpp"
 #include "test_support.hpp"
 
 #include <cail/agent.hpp>
-#include <cail/detail/strict_schema.hpp>
 #include <cail/field.hpp>
 #include <cail/generate.hpp>
 #include <cail/json.hpp>

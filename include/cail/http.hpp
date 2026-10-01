@@ -402,4 +402,7 @@ private:
   RetryPolicy policy_;
 };
 
+[[nodiscard]] std::unique_ptr<HttpTransport>
+make_default_http_transport(TransportOptions options = {});
+
 } // namespace cail

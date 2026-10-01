@@ -4,6 +4,7 @@
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 #include <cail/language_model.hpp>
+#include <cail/schema.hpp>
 
 #include <algorithm>
 #include <concepts>
@@ -24,6 +25,15 @@
 #include <vector>
 
 namespace cail {
+
+template <typename Arguments>
+[[nodiscard]] ToolDefinition make_tool(std::string name, std::string description) {
+  return ToolDefinition{
+      .name = std::move(name),
+      .description = std::move(description),
+      .parameters = schema<Arguments>(),
+  };
+}
 
 struct ToolContext {
   std::string call_id;

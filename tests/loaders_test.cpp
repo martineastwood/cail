@@ -1,3 +1,8 @@
+#include "detail/anthropic.hpp"
+#include "detail/chat_completions.hpp"
+#include "detail/gemini.hpp"
+#include "detail/openai.hpp"
+#include "detail/openai_responses_wire.hpp"
 #include "test_support.hpp"
 
 #include <cail/anthropic.hpp>

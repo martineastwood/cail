@@ -41,13 +41,12 @@ clang_format_tool() {
 }
 
 source_files() {
-  find include tests examples test_package -type f \( -name '*.cpp' -o -name '*.hpp' \) | sort
+  find include src tests examples test_package -path '*/build' -prune -o -type f \( -name '*.cpp' -o -name '*.hpp' \) -print | sort
 }
 
-# CAIL is header-only, so clang-tidy reaches the library through the test
-# translation units and reports on include/ via HeaderFilterRegex.
+# Templates are checked through tests; runtime implementations are checked directly.
 tidy_files() {
-  find tests -maxdepth 1 -type f -name '*.cpp' | sort
+  find src tests -maxdepth 1 -type f -name '*.cpp' | sort
 }
 
 usage() {
@@ -59,10 +58,10 @@ Commands:
   configure [dir]       Configure a build directory
   build [dir] [target]  Build a directory, or one target
   test [dir] [regex]    Run the CTest suites
-  tidy [--fix]          Run clang-tidy over the test translation units
+  tidy [--fix]          Run clang-tidy over library sources and tests
   sanitizer             Build and test with ASan and UBSan
   thread-sanitizer      Build and test with ThreadSanitizer
-  linux-check           Build tests and examples with Ubuntu GCC in Docker
+  linux-check           Build examples and run tests with Ubuntu GCC in Docker
   check                 Format check, configure, build, and test
   clean                 Remove the build directories
 
@@ -144,7 +143,7 @@ cmd_tidy() {
 
   local args=(-p "$BUILD_DIR" -quiet)
   local line_filter
-  line_filter="$(python3 -c 'import json, pathlib; print(json.dumps([{"name": str(path.resolve()), "lines": [[1, 1000000]]} for path in pathlib.Path("include").rglob("*") if path.suffix in {".h", ".hpp"}]))')"
+  line_filter="$(python3 -c 'import json, pathlib; print(json.dumps([{"name": str(path.resolve()), "lines": [[1, 1000000]]} for folder in ("include", "src") for path in pathlib.Path(folder).rglob("*") if path.suffix in {".h", ".hpp", ".cpp"}]))')"
   args+=(--line-filter="$line_filter")
   local tidy_jobs="$JOBS"
   if [[ "${1:-}" == "--fix" ]]; then
@@ -196,6 +195,7 @@ cmd_linux_check() {
 
   log "linux-check (Ubuntu 24.04, GCC)"
   docker run --rm \
+    --env JOBS="$JOBS" \
     --volume "$ROOT:/src:ro" \
     --volume "$ccache_volume:/root/.cache/ccache" \
     --volume "$deps_volume:/root/.cache/cail-fetchcontent" \
@@ -205,8 +205,9 @@ cmd_linux_check() {
       export CAIL_FETCHCONTENT_BASE_DIR=/root/.cache/cail-fetchcontent
       export CCACHE_MAXSIZE=1G
       export CXX=g++
-      ./dev configure /tmp/cail-linux-gcc -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      ./dev configure /tmp/cail-linux-gcc -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       ./dev build /tmp/cail-linux-gcc
+      ./dev test /tmp/cail-linux-gcc
       ccache --show-stats
     '
 }

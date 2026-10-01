@@ -28,7 +28,10 @@ int main() {
     std::cerr << schema.error().message << '\n';
     return 1;
   }
-  // Reaching here proves Glaze, magic_enum, Asio, and OpenSSL all resolved.
+  const auto model = cail::openai("test-model");
+  if (!model || !model.adapter_capabilities().structured_output) {
+    return 1;
+  }
   if (schema->find("confidence") == std::string::npos ||
       schema->find("negative") == std::string::npos) {
     std::cerr << "generated schema is missing expected fields: " << *schema << '\n';

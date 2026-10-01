@@ -3,7 +3,7 @@ title: Install
 description: Add CAIL to a C++23 project with CMake and OpenSSL.
 ---
 
-CAIL is a header-only C++23 library for calling LLM providers from your application.
+CAIL is a static C++23 library for calling LLM providers from your application.
 You install it once with CMake, link `cail::cail` in your project, and include the
 headers you need (for example `<cail/generation.hpp>` and `<cail/openai.hpp>`).
 
@@ -29,12 +29,13 @@ cmake --install build --prefix /path/to/cail
 In your application's `CMakeLists.txt`:
 
 ```cmake
-find_package(cail 0.1 CONFIG REQUIRED)
+find_package(cail 0.3 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE cail::cail)
 ```
 
 Configure your app with `-DCMAKE_PREFIX_PATH=/path/to/cail` so CMake finds the
-installed package.
+installed package. Build CAIL with the same compiler and compatible build
+settings as your application.
 
 The install step also places Glaze and magic_enum in the same prefix, so you do
 not need separate dependency installs for a normal consumer build.

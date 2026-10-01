@@ -6,8 +6,8 @@ Do not shim or maintain legacy beahvior, this is greenfield so we can make break
 
 The native `./dev check` only exercises the compiler selected on the current
 machine. When changing C++ code or investigating a CI-only compile failure, run
-`./dev linux-check` to compile all CAIL test and example targets with Ubuntu
-24.04 GCC. The command requires Docker and does not run CTest. This catches
+`./dev linux-check` to build all CAIL test and example targets and run the tests
+with Ubuntu 24.04 GCC. The command requires Docker. This catches
 Linux/GCC and libstdc++ issues that a successful AppleClang build cannot catch.
 
 The pinned CMake version is in `ci/cmake-version.txt`, read by CI and by the

@@ -1,13 +1,10 @@
-#pragma once
-
+#include "detail/openai_responses_wire.hpp"
+#include <algorithm>
 #include <cail/detail/base64.hpp>
 #include <cail/generation.hpp>
 #include <cail/json.hpp>
 #include <cail/tool.hpp>
-
 #include <glaze/glaze.hpp>
-
-#include <algorithm>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,131 +13,7 @@
 
 namespace cail::detail::openai::wire {
 
-struct InputMessage {
-  std::string role;
-  glz::raw_json content;
-};
-
-struct InputTextPart {
-  std::string type{"input_text"};
-  std::string text;
-};
-
-struct InputImagePart {
-  std::string type{"input_image"};
-  std::string image_url;
-};
-
-struct InputFilePart {
-  std::string type{"input_file"};
-  std::string filename;
-  std::string file_data;
-};
-
-struct FunctionCallInput {
-  std::string type{"function_call"};
-  std::string call_id;
-  std::string name;
-  std::string arguments;
-};
-
-struct FunctionCallOutputInput {
-  std::string type{"function_call_output"};
-  std::string call_id;
-  std::string output;
-};
-
-struct FunctionTool {
-  std::string type{"function"};
-  std::string name;
-  std::string description;
-  glz::raw_json parameters;
-  bool strict{true};
-};
-
-struct JsonSchemaFormat {
-  std::string type{"json_schema"};
-  std::string name;
-  std::optional<std::string> description;
-  bool strict{true};
-  glz::raw_json schema;
-};
-
-struct TextOptions {
-  JsonSchemaFormat format;
-};
-
-struct RequestBody {
-  std::string model;
-  std::vector<glz::raw_json> input;
-  std::optional<std::vector<FunctionTool>> tools;
-  std::optional<std::string> previous_response_id;
-  std::optional<TextOptions> text;
-  std::optional<bool> stream;
-  std::optional<std::size_t> max_output_tokens;
-  std::optional<double> temperature;
-  std::optional<double> top_p;
-  std::optional<glz::generic> tool_choice;
-};
-
-struct ResponseContent {
-  std::string type;
-  std::optional<std::string> text;
-  std::optional<std::string> refusal;
-};
-
-struct ResponseItem {
-  std::string type;
-  std::vector<ResponseContent> content;
-  std::vector<ResponseContent> summary;
-  std::optional<std::string> call_id;
-  std::optional<std::string> name;
-  std::optional<std::string> arguments;
-  std::optional<std::string> encrypted_content;
-};
-
-struct ResponseUsage {
-  std::size_t input_tokens{};
-  std::size_t output_tokens{};
-  struct InputDetails {
-    std::optional<std::size_t> cached_tokens;
-  };
-  struct OutputDetails {
-    std::optional<std::size_t> reasoning_tokens;
-  };
-  std::optional<InputDetails> input_tokens_details;
-  std::optional<OutputDetails> output_tokens_details;
-};
-
-struct ProviderError {
-  std::string message;
-  std::optional<std::string> code;
-  std::optional<std::string> type;
-};
-
-struct ResponseBody {
-  std::optional<std::string> id;
-  std::string status;
-  std::vector<glz::raw_json> output;
-  std::optional<ResponseUsage> usage;
-  std::optional<ProviderError> error;
-  struct IncompleteDetails {
-    std::optional<std::string> reason;
-  };
-  std::optional<IncompleteDetails> incomplete_details;
-};
-
-struct StreamEventBody {
-  std::string type;
-  std::optional<std::string> delta;
-  std::optional<std::size_t> output_index;
-  std::optional<std::string> message;
-  std::optional<ResponseBody> response;
-  std::optional<ProviderError> error;
-};
-
-[[nodiscard]] inline Result<ResponseItem> decode_response_item(const glz::raw_json& raw,
-                                                               int http_status) {
+Result<ResponseItem> decode_response_item(const glz::raw_json& raw, int http_status) {
   ResponseItem item;
   if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(item, raw.str);
       error) {
@@ -154,8 +27,7 @@ struct StreamEventBody {
   return item;
 }
 
-[[nodiscard]] inline Result<GenerationResponse> decode_response(ResponseBody response_body,
-                                                                int http_status) {
+Result<GenerationResponse> decode_response(ResponseBody response_body, int http_status) {
   if (response_body.status == "failed") {
     return std::unexpected(Error{
         .code = ErrorCode::provider_response,
@@ -265,7 +137,7 @@ struct StreamEventBody {
   return result;
 }
 
-[[nodiscard]] inline std::string_view role_name(MessageRole role) {
+std::string_view role_name(MessageRole role) {
   switch (role) {
   case MessageRole::system:
     return "system";
@@ -281,7 +153,7 @@ struct StreamEventBody {
   return {};
 }
 
-[[nodiscard]] inline Result<std::string> text_content(const Message& message) {
+Result<std::string> text_content(const Message& message) {
   std::string text;
   for (const auto& part : message.content) {
     if (const auto* value = std::get_if<TextPart>(&part)) {
@@ -296,7 +168,7 @@ struct StreamEventBody {
   return text;
 }
 
-[[nodiscard]] inline Result<glz::raw_json> input_content(const Message& message) {
+Result<glz::raw_json> input_content(const Message& message) {
   const auto has_image = std::ranges::any_of(message.content, [](const ContentPart& part) {
     return !std::holds_alternative<TextPart>(part);
   });

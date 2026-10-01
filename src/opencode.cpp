@@ -1,0 +1,163 @@
+#include "detail/anthropic.hpp"
+#include "detail/chat_completions.hpp"
+#include "detail/gemini.hpp"
+#include "detail/openai.hpp"
+#include <cail/detail/env.hpp>
+#include <cail/detail/openai_embeddings.hpp>
+#include <cail/opencode.hpp>
+
+namespace cail {
+
+namespace detail::opencode {
+
+inline constexpr std::string_view session_header{"x-opencode-session"};
+
+[[nodiscard]] inline std::string base_url(OpenCodeService service) {
+  switch (service) {
+  case OpenCodeService::zen:
+    return "https://opencode.ai/zen/v1";
+  case OpenCodeService::go:
+    return "https://opencode.ai/zen/go/v1";
+  }
+  std::unreachable();
+}
+
+[[nodiscard]] inline Result<void> validate_request(const GenerationRequest& request,
+                                                   bool has_api_key) {
+  if (!has_api_key) {
+    return std::unexpected(Error{
+        .code = ErrorCode::invalid_configuration,
+        .message = "OpenCode requires an API key (set OPENCODE_API_KEY or pass api_key).",
+    });
+  }
+  if (request.session_id.empty()) {
+    return std::unexpected(Error{
+        .code = ErrorCode::invalid_configuration,
+        .message = "OpenCode requires a caller-supplied, non-empty session_id.",
+    });
+  }
+  return {};
+}
+
+template <typename Client>
+[[nodiscard]] LanguageModel language_model_from(std::shared_ptr<Client> client, bool has_api_key,
+                                                AdapterCapabilities capabilities) {
+  return LanguageModel{
+      [client, has_api_key](const GenerationRequest& request, std::stop_token stop) {
+        if (auto valid = validate_request(request, has_api_key); !valid) {
+          return Result<GenerationResponse>{std::unexpected(valid.error())};
+        }
+        return client->generate(request, stop);
+      },
+      [client, has_api_key](const GenerationRequest& request, const StreamHandler& handler,
+                            std::stop_token stop) {
+        if (auto valid = validate_request(request, has_api_key); !valid) {
+          return Result<GenerationResponse>{std::unexpected(valid.error())};
+        }
+        return client->stream(request, handler, stop);
+      },
+      capabilities,
+      [client, has_api_key](GenerationRequest request, LanguageModel::GenerationCompletion complete,
+                            std::stop_token stop) -> Result<void> {
+        if (auto valid = validate_request(request, has_api_key); !valid)
+          return std::unexpected(valid.error());
+        return client->generate_async(
+            std::move(request),
+            [client, complete = std::move(complete)](Result<GenerationResponse> result) {
+              complete(std::move(result));
+            },
+            stop);
+      },
+  };
+}
+
+} // namespace detail::opencode
+
+LanguageModel OpenCodeProvider::operator()(std::string model_id,
+                                           OpenCodeApiFamily api_family) const {
+  return (*this)(std::move(model_id), api_family, make_default_http_transport());
+}
+
+LanguageModel OpenCodeProvider::operator()(std::string model_id, OpenCodeApiFamily api_family,
+                                           std::unique_ptr<HttpTransport> transport) const {
+  const auto key = detail::env_or(settings_.api_key, "OPENCODE_API_KEY");
+  const auto root = settings_.base_url.empty() ? detail::opencode::base_url(settings_.service)
+                                               : settings_.base_url;
+  const std::string session_header{detail::opencode::session_header};
+  switch (api_family) {
+  case OpenCodeApiFamily::chat_completions: {
+    auto client = std::make_shared<detail::chat_completions::Client>(
+        ChatCompletionsSettings{
+            .endpoint = root + "/chat/completions",
+            .api_key = key,
+            .request_session_header = session_header,
+        },
+        std::move(model_id), std::move(transport));
+    return detail::opencode::language_model_from(std::move(client), !key.empty(),
+                                                 chat_completions_adapter_capabilities());
+  }
+  case OpenCodeApiFamily::responses: {
+    auto client = std::make_shared<detail::openai::Client>(
+        detail::openai::Config{
+            .api_key = key,
+            .model = std::move(model_id),
+            .base_url = root,
+            .request_session_header = session_header,
+        },
+        std::move(transport));
+    return detail::opencode::language_model_from(std::move(client), !key.empty(),
+                                                 detail::openai_responses_adapter_capabilities());
+  }
+  case OpenCodeApiFamily::anthropic_messages: {
+    auto client = std::make_shared<detail::anthropic::Client>(
+        detail::anthropic::Config{
+            .api_key = key,
+            .model = std::move(model_id),
+            .base_url = root,
+            .max_tokens = settings_.anthropic_max_tokens,
+            .request_session_header = session_header,
+        },
+        std::move(transport));
+    return detail::opencode::language_model_from(std::move(client), !key.empty(),
+                                                 AdapterCapabilities{
+                                                     .image_input = true,
+                                                     .pdf_input = true,
+                                                     .tools = true,
+                                                     .structured_output = true,
+                                                     .reasoning = true,
+                                                 });
+  }
+  case OpenCodeApiFamily::gemini: {
+    auto client = std::make_shared<detail::gemini::Client>(
+        detail::gemini::Config{
+            .api_key = key,
+            .model = std::move(model_id),
+            .base_url = root,
+            .request_session_header = session_header,
+            .api_key_header = "Authorization",
+            .api_key_prefix = "Bearer ",
+        },
+        std::move(transport));
+    return detail::opencode::language_model_from(std::move(client), !key.empty(),
+                                                 AdapterCapabilities{
+                                                     .image_input = true,
+                                                     .pdf_input = true,
+                                                     .tools = true,
+                                                     .structured_output = true,
+                                                     .reasoning = true,
+                                                 });
+  }
+  }
+  std::unreachable();
+}
+
+EmbeddingModel OpenCodeProvider::embedding_model(std::string model_id,
+                                                 std::optional<std::size_t> dimensions) const {
+  const auto root = settings_.base_url.empty() ? detail::opencode::base_url(settings_.service)
+                                               : settings_.base_url;
+  return detail::make_openai_style_embedding_model(
+      root + "/embeddings", detail::env_or(settings_.api_key, "OPENCODE_API_KEY"),
+      std::move(model_id), dimensions);
+}
+
+} // namespace cail

@@ -1,3 +1,8 @@
+#include "detail/anthropic.hpp"
+#include "detail/chat_completions.hpp"
+#include "detail/gemini.hpp"
+#include "detail/glaze_http_transport.hpp"
+#include "detail/openai.hpp"
 #include <cail/cail.hpp>
 
 #include <atomic>

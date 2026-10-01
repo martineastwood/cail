@@ -1,3 +1,4 @@
+#include "detail/gemini.hpp"
 #include "test_support.hpp"
 
 #include <cail/cail.hpp>

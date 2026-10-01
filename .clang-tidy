@@ -1,6 +1,5 @@
 ---
-# CAIL is header-only, so the interesting code is reached through the test and
-# example translation units. Tidy runs over those and reports on `include/`.
+# Check compiled implementations and templates reached through the tests.
 Checks: >
   -*,
   bugprone-dangling-handle,
@@ -68,4 +67,4 @@ Checks: >
   -readability-magic-numbers,
   -readability-function-cognitive-complexity
 WarningsAsErrors: '*'
-HeaderFilterRegex: '.*[/\\]include[/\\].*'
+HeaderFilterRegex: '.*[/\\](include|src)[/\\].*'

@@ -1,4 +1,6 @@
+#include "detail/openai.hpp"
 #include "test_support.hpp"
+#include <cail/tool.hpp>
 
 #include <cail/openai.hpp>
 

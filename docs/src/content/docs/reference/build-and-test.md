@@ -7,7 +7,7 @@ This page is for **contributors** working in the CAIL repository. If you only
 use CAIL from your own application, follow [Install](/guides/install/) instead.
 
 The `./dev` script wraps configure, build, test, formatting, and static
-analysis. Use `./dev linux-check` to compile in Ubuntu with GCC when your
+analysis. Use `./dev linux-check` to build and test in Ubuntu with GCC when your
 regular build uses a different compiler, such as AppleClang on macOS.
 
 ## Full validation
@@ -50,7 +50,7 @@ appear with the Linux toolchain, run:
 
 This command requires Docker. It configures Ubuntu 24.04 with GCC and the same
 CMake 3.31.10 release used by CI, then builds the test and example targets
-without running the tests. Docker volumes keep the compiler and
+and runs all tests. Docker volumes keep the compiler and
 dependency caches between runs. Remove them with
 `docker volume rm cail-linux-check-ccache cail-linux-check-fetchcontent`.
 
@@ -59,7 +59,7 @@ dependency caches between runs. Remove them with
 ```sh
 ./dev format        # Check formatting. ./dev format --fix rewrites the files.
 ./dev format --fix
-./dev tidy          # clang-tidy over the test translation units.
+./dev tidy          # clang-tidy over library sources and tests.
 ./dev tidy --fix
 ./dev sanitizer     # Build and test with ASan and UBSan.
 ./dev thread-sanitizer # Build and test for data races with ThreadSanitizer.

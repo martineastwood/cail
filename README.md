@@ -39,7 +39,7 @@ supports:
 - Local file, text, image, and PDF loaders
 - Image and PDF inputs where the provider supports them
 
-CAIL is header-only and targets C++23.
+CAIL is a static library and targets C++23. Link `cail::cail` to use it.
 
 ## Install
 
@@ -68,7 +68,7 @@ cmake --install build --prefix /path/to/cail
 In a consuming project's `CMakeLists.txt`:
 
 ```cmake
-find_package(cail 0.1 CONFIG REQUIRED)
+find_package(cail 0.3 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE cail::cail)
 ```
 
@@ -885,21 +885,26 @@ Errors include a stable `code`; OpenAI errors can also include `http_status`,
 
 ## Compile time
 
-CAIL is header-only, so each translation unit that includes it also parses Glaze, Asio, and
-OpenSSL. Measured on an Apple M1 Pro with AppleClang 17, best of three runs:
+Link `cail::cail` and include the provider header you use:
 
-| Included header | `-O0` | `-O2` |
-| --- | --- | --- |
-| `<cail/error.hpp>` | 0.1 s | 0.1 s |
-| `<cail/generation.hpp>` | 1.2 s | 1.2 s |
-| `<cail/openai.hpp>` | 6.7 s | 6.8 s |
-| `<cail/cail.hpp>` | 8.2 s | 8.2 s |
+```cmake
+find_package(cail 0.3 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE cail::cail)
+```
 
-The optimization level barely matters, because parsing the dependency headers dominates.
-Two things follow. Include the provider header you use rather than `<cail/cail.hpp>`,
-which saves about 1.5 s per translation unit. If several translation units call CAIL, give
-the project a precompiled header or a unity build, which is where the rest of the time
-comes back.
+```cpp
+#include <cail/openai.hpp>
+
+auto model = cail::openai("gpt-6-luna");
+```
+
+CAIL builds a static library once for your compiler and build configuration.
+Your application still compiles typed JSON, schema, and tool helpers for the C++
+types you use. The coroutine API also requires Asio headers.
+
+Include `<cail/schema.hpp>` for typed schema generation or `<cail/tool.hpp>` for
+`make_tool<T>()`. You can use `<cail/cail.hpp>` to include the complete API.
+For a large project, precompiled headers can reduce the remaining header costs.
 
 ## Examples
 
