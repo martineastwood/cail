@@ -28,7 +28,7 @@ private:
   struct Operation;
 
   void start_request(HttpRequest request, HttpDataHandler on_data, HttpCompletion complete,
-                     std::stop_token stop, bool streaming = false);
+                     const std::stop_token& stop, bool streaming = false);
 
   [[nodiscard]] static Result<HttpResponse> blocking_callback_error();
 

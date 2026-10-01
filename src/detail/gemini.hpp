@@ -149,11 +149,11 @@ public:
       std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport());
 
   [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs,
-                                                  std::stop_token stop = {}) const;
+                                                  const std::stop_token& stop = {}) const;
 
-  [[nodiscard]] Result<void> embed_many_async(std::vector<std::string> inputs,
+  [[nodiscard]] Result<void> embed_many_async(const std::vector<std::string>& inputs,
                                               EmbeddingModel::BatchCompletion complete,
-                                              std::stop_token stop = {}) const;
+                                              const std::stop_token& stop = {}) const;
 
 private:
   [[nodiscard]] Result<HttpRequest> make_http_request(const std::vector<std::string>& inputs) const;
@@ -175,18 +175,18 @@ public:
                   std::unique_ptr<HttpTransport> transport = cail::make_default_http_transport());
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
-                                                    std::stop_token stop = {}) const;
+                                                    const std::stop_token& stop = {}) const;
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& handler,
-                                                  std::stop_token stop = {}) const;
+                                                  const std::stop_token& stop = {}) const;
 
   [[nodiscard]] Result<void> generate_async(GenerationRequest request,
                                             LanguageModel::GenerationCompletion complete,
-                                            std::stop_token stop = {}) const;
+                                            const std::stop_token& stop = {}) const;
 
   [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
                                           LanguageModel::GenerationCompletion complete,
-                                          std::stop_token stop = {}) const;
+                                          const std::stop_token& stop = {}) const;
 
 private:
   struct StreamState;
@@ -197,8 +197,9 @@ private:
   [[nodiscard]] Result<HttpRequest> make_http_request(const GenerationRequest& request,
                                                       bool streaming) const;
 
-  [[nodiscard]] Result<GenerationResponse>
-  run(const GenerationRequest& request, const StreamHandler& handler, std::stop_token stop) const;
+  [[nodiscard]] Result<GenerationResponse> run(const GenerationRequest& request,
+                                               const StreamHandler& handler,
+                                               const std::stop_token& stop) const;
   Config config_;
   std::unique_ptr<HttpTransport> transport_;
 };

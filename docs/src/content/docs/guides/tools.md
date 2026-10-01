@@ -54,6 +54,121 @@ including asynchronous handlers. Invalid arguments return
 The model needs function calling support. A model without it may answer with
 text instead of a call, so check `result->tool_results` before decoding one.
 
+## Let the model recover from tool errors
+
+You can return argument and execution errors to the model so it can correct a
+call or choose another approach:
+
+```cpp
+auto result = cail::generate_text({
+    .model = cail::openai("gpt-6-luna"),
+    .prompt = "Fetch the weather for Paris.",
+    .tools = {weather_tool},
+    .tool_loop = {.recover_tool_errors = true},
+});
+```
+
+Recovery is off by default. When enabled, `tool_execution`, `invalid_tool_call`,
+`json_deserialization`, and `schema_validation` errors become tool results with
+JSON such as `{"error":"Unknown location"}`. Later calls in the batch still run,
+and the model receives every result at the next step. Thrown handler exceptions
+also become `tool_execution` errors.
+
+Cancellation, missing tools, transport errors, and other error codes still end
+the loop. Return `Result<Output>` from your handler with `tool_execution` for a
+failure the model can act on. The existing `max_rounds` limit also bounds recovery.
+Error results do not match your declared output type, so `decode_output` can fail
+for these entries.
+
+## Approve calls or execute them elsewhere
+
+You can inspect tool calls before executing them and resume with results from
+your application. This example asks for approval before fetching weather:
+
+```cpp
+#include <cail/cail.hpp>
+#include <iostream>
+#include <string>
+#include <vector>
+
+struct WeatherQuery { std::string location; };
+struct WeatherReport { std::string location; int temperature_fahrenheit{}; };
+
+int main() {
+    auto model = cail::openai("gpt-6-luna");
+    auto weather = cail::tool<WeatherQuery, WeatherReport>(
+        "weather", "Fetch weather for a location.", [](const WeatherQuery& query) {
+            return WeatherReport{query.location, 72}; // Replace with your weather service.
+        });
+    auto result = cail::generate_text({
+        .model = model,
+        .prompt = "Use the weather tool to fetch the weather for Paris.",
+        .tools = {weather},
+        .tool_loop = {.pause_when = [](const cail::ToolCall&) { return true; }},
+    });
+    while (result && result->tool_continuation) {
+        std::vector<cail::ToolResult> outputs;
+        for (const auto& call : result->tool_calls) {
+            std::cout << call.name << " " << call.arguments << "\nApprove? [y/N] ";
+            std::string answer;
+            std::getline(std::cin, answer);
+            cail::Result<std::string> output = std::string{R"({"error":"Approval denied"})"};
+            if (answer == "y") output = weather.execute(call, {});
+            if (!output) {
+                std::cerr << output.error().message << '\n';
+                return 1;
+            }
+            outputs.push_back({call.id, call.name, *output});
+        }
+        result = cail::resume_tool_loop(model, *result->tool_continuation, outputs);
+    }
+    if (!result) {
+        std::cerr << result.error().message << '\n';
+        return 1;
+    }
+    std::cout << result->text << '\n';
+}
+```
+
+If any call matches `pause_when`, the entire batch returns before any of its
+tools execute. Inspect `tool_calls` and supply exactly one `ToolResult` per call,
+with matching IDs and names in the same order. You can execute calls locally,
+send them to a queue, or return a JSON rejection. Tell the model in your system
+prompt how it should handle rejected calls.
+
+`tool_continuation` retains the original request options, tools, pause policy,
+and round limit. Resumed responses include the earlier steps, tool results,
+conversation turn, and total reported usage. A subsequent batch can pause again.
+
+Continuations are process-local and single-use. Keep the continuation alive
+until you resume it; it cannot be serialized for use after a restart. Invalid
+results or a pre-cancelled stop token leave it available for correction. Once
+valid results are accepted, a failed or cancelled run cannot reuse it. External
+tool execution belongs to your application, so avoid executing the same call
+twice while retrying a rejected resume.
+
+For streaming, use `resume_stream_tool_loop(model, continuation, outputs, on_event)`.
+For callbacks, use `resume_tool_loop_async(model, continuation, outputs, on_complete)`
+or `resume_stream_tool_loop_async(model, continuation, outputs, on_event, on_complete)`.
+These callback APIs accept a stop token and `AsyncOptions` after the completion
+handler, including a callback scheduler and an event limit for streams.
+
+You can also await resumption by passing the shared continuation pointer:
+
+```cpp
+auto resumed = co_await cail::resume_tool_loop_async(
+    model, result->tool_continuation, outputs);
+```
+
+Use `resume_stream_tool_loop_async` with the shared pointer and an event handler
+to await a resumed stream. These overloads retain the continuation until completion.
+
+If you use agent memory, a paused response does not append the unfinished turn.
+The standalone resume functions do not save agent memory. For approval workflows,
+use the agent's `GenerationRequest` overload with application-managed history,
+then append the final response's `turn` once the workflow finishes. See
+[Memory](/guides/memory/) for manually managed conversations.
+
 ## Manage each round yourself
 
 For the common case of a model with standing instructions and a fixed tool set,
@@ -127,7 +242,8 @@ streaming, and async tool loops.
 
 Async generation runs tool handlers on a worker, so a slow synchronous tool does
 not occupy the provider's completion thread. Calls execute in model order. The
-first tool error ends the loop, and later calls do not start.
+first tool error ends the loop by default, and later calls do not start.
+Set `recover_tool_errors` to let the model respond to argument and execution errors.
 
 For a tool that already provides an asynchronous API, use `async_tool`. Pass the
 input and context by value and call the completion callback exactly once with

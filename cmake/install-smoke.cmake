@@ -11,6 +11,10 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${CAIL_SOURCE_DIR}/tests/consumer" -B "${CAIL_TEST_BUILD}"
         -G "${CAIL_GENERATOR}"
         "-DCMAKE_PREFIX_PATH=${CAIL_INSTALL_PREFIX}"
+        "-DCMAKE_CXX_COMPILER=${CAIL_CXX_COMPILER}"
+        "-DCMAKE_CXX_FLAGS=${CAIL_CXX_FLAGS}"
+        "-DCMAKE_EXE_LINKER_FLAGS=${CAIL_EXE_LINKER_FLAGS}"
+        "-DCMAKE_BUILD_TYPE=${CAIL_CONFIGURATION}"
     RESULT_VARIABLE configure_result
 )
 if(NOT configure_result EQUAL 0)

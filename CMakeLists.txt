@@ -284,6 +284,9 @@ if(BUILD_TESTING)
             "-DCAIL_TEST_BUILD=${CMAKE_BINARY_DIR}/install-smoke-consumer"
             "-DCAIL_GENERATOR=${CMAKE_GENERATOR}"
             "-DCAIL_CONFIGURATION=$<CONFIG>"
+            "-DCAIL_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DCAIL_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DCAIL_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install-smoke.cmake"
     )
 endif()

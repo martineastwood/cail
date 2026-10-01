@@ -40,7 +40,7 @@ auto scheduled_completion(Completion complete, const AsyncOptions& options) {
 class StreamDelivery : public std::enable_shared_from_this<StreamDelivery> {
 public:
   StreamDelivery(StreamHandler handler, std::function<void(Result<GenerationResponse>)> complete,
-                 AsyncOptions options, std::stop_token stop)
+                 AsyncOptions options, const std::stop_token& stop)
       : handler_(std::move(handler)),
         complete_(complete_once<GenerationResponse>(std::move(complete))),
         options_(std::move(options)), application_(stop, [this] { stop_.request_stop(); }) {}
@@ -52,8 +52,9 @@ public:
     bool overflow = false;
     {
       std::lock_guard lock(mutex_);
-      if (terminal_ || error_ || token().stop_requested())
+      if (terminal_ || error_ || token().stop_requested()) {
         return;
+      }
       if (events_.size() >= options_.max_pending_events) {
         error_ = Error{.code = ErrorCode::backpressure,
                        .message = "The async stream consumer exceeded max_pending_events."};
@@ -64,24 +65,28 @@ public:
         launch = !std::exchange(scheduled_, true);
       }
     }
-    if (overflow)
+    if (overflow) {
       stop_.request_stop();
-    if (launch)
+    }
+    if (launch) {
       schedule();
+    }
   }
 
   void finish(Result<GenerationResponse> result) {
     bool launch;
     {
       std::lock_guard lock(mutex_);
-      if (terminal_)
+      if (terminal_) {
         return;
+      }
       terminal_ = true;
       result_ = std::move(result);
       launch = !std::exchange(scheduled_, true);
     }
-    if (launch)
+    if (launch) {
       schedule();
+    }
   }
 
   void abort() {
@@ -98,10 +103,11 @@ private:
   void schedule() {
     auto self = shared_from_this();
     try {
-      if (options_.schedule)
+      if (options_.schedule) {
         options_.schedule([self] { self->drain(); });
-      else
+      } else {
         drain();
+      }
     } catch (...) {
       {
         std::lock_guard lock(mutex_);
@@ -120,8 +126,9 @@ private:
       std::optional<Result<GenerationResponse>> result;
       {
         std::lock_guard lock(mutex_);
-        if (error_ || token().stop_requested())
+        if (error_ || token().stop_requested()) {
           events_.clear();
+        }
         if (!events_.empty()) {
           event = std::move(events_.front());
           events_.pop_front();
@@ -130,10 +137,11 @@ private:
           result_.reset();
           if (error_ || token().stop_requested()) {
             auto error = error_.value_or(generation_cancelled_error());
-            if (*result && !(*result)->steps.empty())
+            if (*result && !(*result)->steps.empty()) {
               error.partial_response = std::make_shared<GenerationResponse>(std::move(**result));
-            else if (!*result)
+            } else if (!*result) {
               error.partial_response = result->error().partial_response;
+            }
             *result = std::unexpected(std::move(error));
           }
         } else {
@@ -146,8 +154,9 @@ private:
         return;
       }
       try {
-        if (!token().stop_requested())
+        if (!token().stop_requested()) {
           handler_(*event);
+        }
       } catch (...) {
         {
           std::lock_guard lock(mutex_);

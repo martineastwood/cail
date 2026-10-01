@@ -26,6 +26,8 @@
 
 namespace cail {
 
+// Own names so callers can transfer their strings into the tool definition.
+// NOLINTBEGIN(performance-unnecessary-value-param)
 template <typename Arguments>
 [[nodiscard]] ToolDefinition make_tool(std::string name, std::string description) {
   return ToolDefinition{
@@ -34,6 +36,8 @@ template <typename Arguments>
       .parameters = schema<Arguments>(),
   };
 }
+
+// NOLINTEND(performance-unnecessary-value-param)
 
 struct ToolContext {
   std::string call_id;
@@ -58,8 +62,9 @@ public:
   [[nodiscard]] Result<std::string> execute(const ToolCall& call,
                                             const ToolContext& context) const {
     try {
-      if (executor_)
+      if (executor_) {
         return executor_(call, context);
+      }
       struct Pending {
         std::mutex mutex;
         std::condition_variable ready;
@@ -72,15 +77,17 @@ public:
       });
       async_executor_(call, context, [pending](Result<std::string> result) {
         std::lock_guard lock(pending->mutex);
-        if (!pending->result)
+        if (!pending->result) {
           pending->result = std::move(result);
+        }
         pending->ready.notify_all();
       });
       std::unique_lock lock(pending->mutex);
       pending->ready.wait(
           lock, [&] { return pending->result.has_value() || context.stop.stop_requested(); });
-      if (context.stop.stop_requested())
+      if (context.stop.stop_requested()) {
         return std::unexpected(generation_cancelled_error());
+      }
       return std::move(*pending->result);
     } catch (const std::exception& error) {
       return std::unexpected(Error{
@@ -98,9 +105,10 @@ public:
   // Async handlers resume directly; synchronous handlers use bounded workers.
   [[nodiscard]] Result<void> execute_async(ToolCall call, ToolContext context,
                                            Completion complete) const {
-    if (!complete)
+    if (!complete) {
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                    .message = "Async tools require a completion handler."});
+    }
     auto done = detail::complete_once<std::string>(std::move(complete));
     if (context.stop.stop_requested()) {
       done(std::unexpected(generation_cancelled_error()));
@@ -110,13 +118,14 @@ public:
       const auto stop = context.stop;
       return detail::tool_workers().post(
           [tool = *this, call = std::move(call), context = std::move(context),
-           done](std::stop_token worker_stop) mutable {
-            detail::LinkedStop linked(context.stop, worker_stop);
+           done](const std::stop_token& worker_stop) mutable {
+            detail::LinkedStop linked(context.stop, std::move(worker_stop));
             context.stop = linked.source.get_token();
-            if (context.stop.stop_requested())
+            if (context.stop.stop_requested()) {
               done(std::unexpected(generation_cancelled_error()));
-            else
+            } else {
               done(tool.execute(call, context));
+            }
           },
           stop);
     }
@@ -129,11 +138,13 @@ public:
     };
     auto pending = std::make_shared<Pending>(*this, done);
     pending->cancel.emplace(context.stop, [weak = std::weak_ptr(pending)] {
-      if (auto active = weak.lock())
+      if (auto active = weak.lock()) {
         active->complete(std::unexpected(generation_cancelled_error()));
+      }
     });
-    if (context.stop.stop_requested())
+    if (context.stop.stop_requested()) {
       return {};
+    }
     try {
       pending->tool.async_executor_(
           std::move(call), std::move(context),
@@ -166,6 +177,26 @@ struct ToolLoopOptions {
   // Send this many previous user turns, including their assistant/tool exchanges.
   // Leading system/developer messages stay. Zero sends the full history.
   std::size_t keep_last_turns{0};
+  bool recover_tool_errors{false};
+  // If any call matches, return the entire batch without executing tools.
+  std::function<bool(const ToolCall&)> pause_when;
+};
+
+namespace detail {
+class ToolLoop;
+}
+
+// Process-local, single-use state. Retains request settings and tool handlers.
+class ToolContinuation {
+public:
+  [[nodiscard]] Result<std::shared_ptr<detail::ToolLoop>>
+  resume(const std::vector<ToolResult>& results, const std::stop_token& stop, AsyncOptions async);
+
+private:
+  friend class detail::ToolLoop;
+  explicit ToolContinuation(std::shared_ptr<detail::ToolLoop> loop) : loop_(std::move(loop)) {}
+  std::mutex mutex_;
+  std::shared_ptr<detail::ToolLoop> loop_;
 };
 
 namespace detail {
@@ -257,7 +288,7 @@ template <typename Input, typename Output, typename Handler>
   return ExecutableTool<Input, Output>(
       std::move(name), std::move(description),
       Tool::AsyncExecutor{
-          [shared_handler](ToolCall call, ToolContext context, Tool::Completion complete) {
+          [shared_handler](const ToolCall& call, ToolContext context, Tool::Completion complete) {
             auto input = from_json<Input>(call.arguments);
             if (!input) {
               complete(std::unexpected(input.error()));
@@ -278,8 +309,9 @@ public:
   ToolLoop(GenerationRequest initial, std::vector<Tool> registered, ToolLoopOptions settings)
       : request(std::move(initial)), options(std::move(settings)), tools(std::move(registered)) {
     request.tools.clear();
-    for (const auto& tool : tools)
+    for (const auto& tool : tools) {
       request.tools.push_back(tool.definition());
+    }
   }
 
   [[nodiscard]] Result<bool> begin_step(Result<GenerationResponse> response) {
@@ -301,17 +333,21 @@ public:
                                      .usage = response->usage,
                                      .tool_calls = response->tool_calls});
       if (response->usage) {
-        if (!total_usage)
+        if (!total_usage) {
           total_usage.emplace();
+        }
         add_usage(*total_usage, *response->usage);
       }
     }
-    if (auto middleware = run_after_step(request, response); !middleware)
+    if (auto middleware = run_after_step(request, response); !middleware) {
       return std::unexpected(middleware.error());
-    if (options.stop.stop_requested())
+    }
+    if (options.stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
-    if (!response)
+    }
+    if (!response) {
       return std::unexpected(response.error());
+    }
     bool stopped = false;
     if (options.stop_when) {
       try {
@@ -325,8 +361,9 @@ public:
                                      .message = "The tool-loop stop condition failed."});
       }
     }
-    if (options.stop.stop_requested())
+    if (options.stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     auto assistant = Message{
         .role = MessageRole::assistant,
         .content = response->text.empty()
@@ -344,10 +381,11 @@ public:
       result = std::move(*response);
       return true;
     }
-    if (round >= options.max_rounds)
+    if (round >= options.max_rounds) {
       return std::unexpected(
           Error{.code = ErrorCode::tool_loop_limit,
                 .message = "The model exceeded the configured tool-call round limit."});
+    }
     follow_up = GenerationRequest{
         .tools = request.tools,
         .structured_output = request.structured_output,
@@ -373,25 +411,60 @@ public:
     }
     calls = std::move(response->tool_calls);
     tool_index = 0;
+    try {
+      const bool paused = options.pause_when && std::ranges::any_of(calls, options.pause_when);
+      if (options.stop.stop_requested()) {
+        return std::unexpected(generation_cancelled_error());
+      }
+      if (paused) {
+        result.steps = steps;
+        result.total_usage = total_usage;
+        result.turn = turn;
+        result.tool_results = tool_results;
+        result.tool_continuation = std::shared_ptr<ToolContinuation>(
+            new ToolContinuation(std::make_shared<ToolLoop>(*this)));
+        return true;
+      }
+    } catch (const std::exception& error) {
+      return std::unexpected(
+          Error{.code = ErrorCode::invalid_configuration,
+                .message = std::string{"Tool pause condition failed: "} + error.what()});
+    } catch (...) {
+      return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                   .message = "Tool pause condition failed."});
+    }
     return false;
   }
 
   [[nodiscard]] Result<const Tool*> next_tool() const {
-    if (options.stop.stop_requested())
+    if (options.stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     const auto& call = calls[tool_index];
     const auto tool = std::ranges::find_if(
         tools, [&call](const auto& candidate) { return candidate.definition().name == call.name; });
-    if (tool == tools.end())
+    if (tool == tools.end()) {
       return std::unexpected(
           Error{.code = ErrorCode::tool_not_found,
                 .message = "The model requested an unregistered tool: " + call.name});
+    }
     return &*tool;
   }
 
   [[nodiscard]] Result<void> accept_tool(Result<std::string> output) {
-    if (!output)
-      return std::unexpected(output.error());
+    if (!output) {
+      const auto& error = output.error();
+      if (!options.recover_tool_errors ||
+          (error.code != ErrorCode::tool_execution && error.code != ErrorCode::invalid_tool_call &&
+           error.code != ErrorCode::json_deserialization &&
+           error.code != ErrorCode::schema_validation)) {
+        return std::unexpected(error);
+      }
+      output = to_json(ProviderOptions{{"error", error.message}});
+      if (!output) {
+        return std::unexpected(output.error());
+      }
+    }
     const auto& call = calls[tool_index];
     tool_results.push_back({.call_id = call.id, .name = call.name, .output = *output});
     Message message{.role = MessageRole::tool,
@@ -400,8 +473,9 @@ public:
     follow_up.messages.push_back(message);
     turn.push_back(std::move(message));
     ++tool_index;
-    if (options.stop.stop_requested())
+    if (options.stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     return {};
   }
 
@@ -412,15 +486,18 @@ public:
 
   [[nodiscard]] Result<bool> accept(Result<GenerationResponse> response) {
     auto finished = begin_step(std::move(response));
-    if (!finished || *finished)
+    if (!finished || *finished) {
       return finished;
+    }
     while (tool_index < calls.size()) {
       auto tool = next_tool();
-      if (!tool)
+      if (!tool) {
         return std::unexpected(tool.error());
+      }
       const auto& call = calls[tool_index];
-      if (auto output = accept_tool((*tool)->execute(call, tool_context())); !output)
+      if (auto output = accept_tool((*tool)->execute(call, tool_context())); !output) {
         return std::unexpected(output.error());
+      }
     }
     advance();
     return false;
@@ -460,19 +537,27 @@ private:
 };
 
 template <typename Send>
+[[nodiscard]] Result<GenerationResponse> continue_tool_loop(ToolLoop& loop, Send&& send) {
+  while (true) {
+    if (loop.options.stop.stop_requested()) {
+      return std::unexpected(loop.with_progress(generation_cancelled_error()));
+    }
+    auto finished = loop.accept(send(loop.request));
+    if (!finished) {
+      return std::unexpected(loop.with_progress(finished.error()));
+    }
+    if (*finished) {
+      return std::move(loop.result);
+    }
+  }
+}
+
+template <typename Send>
 [[nodiscard]] Result<GenerationResponse> run_tool_loop(GenerationRequest request,
                                                        const std::vector<Tool>& tools,
                                                        ToolLoopOptions options, Send&& send) {
   ToolLoop loop(std::move(request), tools, std::move(options));
-  while (true) {
-    if (loop.options.stop.stop_requested())
-      return std::unexpected(loop.with_progress(generation_cancelled_error()));
-    auto finished = loop.accept(send(loop.request));
-    if (!finished)
-      return std::unexpected(loop.with_progress(finished.error()));
-    if (*finished)
-      return std::move(loop.result);
-  }
+  return continue_tool_loop(loop, std::forward<Send>(send));
 }
 
 class AsyncToolLoop : public std::enable_shared_from_this<AsyncToolLoop> {
@@ -484,22 +569,33 @@ public:
         complete_(complete_once<GenerationResponse>(std::move(complete))),
         on_event_(std::move(on_event)) {}
 
+  AsyncToolLoop(ToolLoop loop, LanguageModel model, LanguageModel::GenerationCompletion complete,
+                StreamHandler on_event = {})
+      : loop_(std::move(loop)), model_(std::move(model)),
+        complete_(complete_once<GenerationResponse>(std::move(complete))),
+        on_event_(std::move(on_event)) {}
+
   [[nodiscard]] Result<void> start() {
     auto completion = [self = shared_from_this()](Result<GenerationResponse> response) {
       self->dispatch([self, response = std::move(response)]() mutable {
         auto finished = self->loop_.begin_step(std::move(response));
-        if (!finished)
+        if (!finished) {
           self->finish(std::unexpected(finished.error()));
-        else if (*finished)
+        } else if (*finished) {
           self->finish(std::move(self->loop_.result));
-        else
+        } else {
           self->next_tool();
+        }
       });
     };
-    if (on_event_)
-      return model_.stream_async(loop_.request, on_event_, std::move(completion),
-                                 loop_.options.stop);
-    return model_.generate_async(loop_.request, std::move(completion), loop_.options.stop);
+    auto started =
+        on_event_ ? model_.stream_async(loop_.request, on_event_, std::move(completion),
+                                        loop_.options.stop)
+                  : model_.generate_async(loop_.request, std::move(completion), loop_.options.stop);
+    if (!started) {
+      return std::unexpected(loop_.with_progress(started.error()));
+    }
+    return started;
   }
 
 private:
@@ -508,8 +604,9 @@ private:
   void dispatch(std::function<void()> task) {
     std::unique_lock lock(mutex_);
     pending_.push_back(std::move(task));
-    if (running_)
+    if (running_) {
       return;
+    }
     running_ = true;
     while (!pending_.empty()) {
       auto next = std::move(pending_.front());
@@ -535,8 +632,9 @@ private:
   void next_tool() {
     if (loop_.tool_index == loop_.calls.size()) {
       loop_.advance();
-      if (auto started = start(); !started)
+      if (auto started = start(); !started) {
         finish(std::unexpected(started.error()));
+      }
       return;
     }
     auto tool = loop_.next_tool();
@@ -548,19 +646,22 @@ private:
         loop_.calls[loop_.tool_index], loop_.tool_context(),
         [self = shared_from_this()](Result<std::string> output) {
           self->dispatch([self, output = std::move(output)]() mutable {
-            if (auto accepted = self->loop_.accept_tool(std::move(output)); !accepted)
+            if (auto accepted = self->loop_.accept_tool(std::move(output)); !accepted) {
               self->finish(std::unexpected(accepted.error()));
-            else
+            } else {
               self->next_tool();
+            }
           });
         });
-    if (!started)
+    if (!started) {
       finish(std::unexpected(started.error()));
+    }
   }
 
   void finish(Result<GenerationResponse> response) {
-    if (!response)
+    if (!response) {
       response = std::unexpected(loop_.with_progress(response.error()));
+    }
     finished_ = true;
     complete_(std::move(response));
   }
@@ -576,6 +677,154 @@ private:
 };
 
 } // namespace detail
+
+inline Result<std::shared_ptr<detail::ToolLoop>>
+ToolContinuation::resume(const std::vector<ToolResult>& results, const std::stop_token& stop,
+                         AsyncOptions async) {
+  std::lock_guard lock(mutex_);
+  if (!loop_) {
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message = "The tool continuation has already been resumed."});
+  }
+  if (stop.stop_requested()) {
+    return std::unexpected(generation_cancelled_error());
+  }
+  if (results.size() != loop_->calls.size()) {
+    return std::unexpected(Error{.code = ErrorCode::invalid_tool_call,
+                                 .message = "Resume requires one result per pending tool call."});
+  }
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    if (results[i].call_id != loop_->calls[i].id || results[i].name != loop_->calls[i].name) {
+      return std::unexpected(
+          Error{.code = ErrorCode::invalid_tool_call,
+                .message = "Tool results must match pending call IDs and names in order."});
+    }
+  }
+  auto loop = std::exchange(loop_, {});
+  loop->options.stop = stop;
+  loop->options.async = std::move(async);
+  for (const auto& result : results) {
+    if (auto accepted = loop->accept_tool(result.output); !accepted) {
+      return std::unexpected(loop->with_progress(accepted.error()));
+    }
+  }
+  loop->advance();
+  return loop;
+}
+
+template <typename Client>
+[[nodiscard]] Result<GenerationResponse>
+resume_tool_loop(const Client& client, ToolContinuation& continuation,
+                 const std::vector<ToolResult>& results, const std::stop_token& stop = {}) {
+  auto loop = continuation.resume(results, stop, {});
+  if (!loop) {
+    return std::unexpected(loop.error());
+  }
+  return detail::continue_tool_loop(
+      **loop, [&](const GenerationRequest& request) { return client.generate(request, stop); });
+}
+
+template <typename Client>
+[[nodiscard]] Result<GenerationResponse>
+resume_stream_tool_loop(const Client& client, ToolContinuation& continuation,
+                        const std::vector<ToolResult>& results, const StreamHandler& on_event,
+                        const std::stop_token& stop = {}) {
+  if (!on_event) {
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message = "Resuming a stream requires an event handler."});
+  }
+  auto loop = continuation.resume(results, stop, {});
+  if (!loop) {
+    return std::unexpected(loop.error());
+  }
+  return detail::continue_tool_loop(**loop, [&](const GenerationRequest& request) {
+    return client.stream(request, on_event, stop);
+  });
+}
+
+[[nodiscard]] inline Result<void>
+resume_tool_loop_async(LanguageModel model, ToolContinuation& continuation,
+                       const std::vector<ToolResult>& results,
+                       LanguageModel::GenerationCompletion complete,
+                       const std::stop_token& stop = {}, const AsyncOptions& async = {}) {
+  if (!complete) {
+    return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                 .message = "Resuming requires a completion handler."});
+  }
+  auto loop = continuation.resume(results, stop, async);
+  if (!loop) {
+    return std::unexpected(loop.error());
+  }
+  auto done = detail::scheduled_completion<GenerationResponse>(std::move(complete), async);
+  return std::make_shared<detail::AsyncToolLoop>(std::move(**loop), std::move(model),
+                                                 std::move(done))
+      ->start();
+}
+
+[[nodiscard]] inline Result<void>
+resume_stream_tool_loop_async(LanguageModel model, ToolContinuation& continuation,
+                              const std::vector<ToolResult>& results, StreamHandler on_event,
+                              LanguageModel::GenerationCompletion complete,
+                              const std::stop_token& stop = {}, const AsyncOptions& async = {}) {
+  if (!on_event || !complete || !async.max_pending_events) {
+    return std::unexpected(
+        Error{.code = ErrorCode::invalid_configuration,
+              .message = "Resuming a stream requires handlers and a positive event limit."});
+  }
+  auto delivery = std::make_shared<detail::StreamDelivery>(std::move(on_event), std::move(complete),
+                                                           async, stop);
+  auto loop = continuation.resume(results, delivery->token(), {});
+  if (!loop) {
+    return std::unexpected(loop.error());
+  }
+  auto started =
+      std::make_shared<detail::AsyncToolLoop>(
+          std::move(**loop), std::move(model),
+          [delivery](Result<GenerationResponse> result) { delivery->finish(std::move(result)); },
+          [delivery](const StreamEvent& event) { delivery->event(event); })
+          ->start();
+  if (!started) {
+    delivery->abort();
+  }
+  return started;
+}
+
+[[nodiscard]] inline Task<Result<GenerationResponse>>
+resume_tool_loop_async(LanguageModel model, std::shared_ptr<ToolContinuation> continuation,
+                       std::vector<ToolResult> results, const std::stop_token& stop = {},
+                       AsyncOptions async = {}) {
+  return detail::await_result<GenerationResponse>(
+      [model = std::move(model), continuation = std::move(continuation),
+       results = std::move(results), async = std::move(async)](
+          auto complete, const auto& token, const auto&) mutable -> Result<void> {
+        if (!continuation) {
+          return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                       .message = "Resuming requires a tool continuation."});
+        }
+        return resume_tool_loop_async(std::move(model), *continuation, results, std::move(complete),
+                                      token, async);
+      },
+      stop);
+}
+
+[[nodiscard]] inline Task<Result<GenerationResponse>>
+resume_stream_tool_loop_async(LanguageModel model, std::shared_ptr<ToolContinuation> continuation,
+                              std::vector<ToolResult> results, StreamHandler on_event,
+                              const std::stop_token& stop = {}, AsyncOptions async = {}) {
+  return detail::await_result<GenerationResponse>(
+      [model = std::move(model), continuation = std::move(continuation),
+       results = std::move(results), on_event = std::move(on_event), async = std::move(async)](
+          auto complete, const auto& token, const auto&) mutable -> Result<void> {
+        if (!continuation) {
+          return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
+                                       .message = "Resuming requires a tool continuation."});
+        }
+        return resume_stream_tool_loop_async(std::move(model), *continuation, results,
+                                             std::move(on_event), std::move(complete), token,
+                                             async);
+      },
+      stop);
+}
 
 template <typename Client>
 [[nodiscard]] Result<GenerationResponse>
@@ -598,11 +847,13 @@ stream_tool_loop(const Client& client, GenerationRequest request, const std::vec
 [[nodiscard]] inline Result<void>
 run_tool_loop_async(LanguageModel model, GenerationRequest request, std::vector<Tool> tools,
                     LanguageModel::GenerationCompletion complete, ToolLoopOptions options = {}) {
-  if (!complete)
+  if (!complete) {
     return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                  .message = "Async tool loops require a completion handler."});
-  if (options.stop.stop_requested())
+  }
+  if (options.stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto done = detail::scheduled_completion<GenerationResponse>(std::move(complete), options.async);
   return std::make_shared<detail::AsyncToolLoop>(std::move(model), std::move(request),
                                                  std::move(tools), std::move(options),
@@ -614,14 +865,17 @@ run_tool_loop_async(LanguageModel model, GenerationRequest request, std::vector<
 stream_tool_loop_async(LanguageModel model, GenerationRequest request, std::vector<Tool> tools,
                        StreamHandler on_event, LanguageModel::GenerationCompletion complete,
                        ToolLoopOptions options = {}) {
-  if (!on_event || !complete)
+  if (!on_event || !complete) {
     return std::unexpected(
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Async streaming requires event and completion handlers."});
-  if (options.stop.stop_requested())
+  }
+  if (options.stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
-  if (!options.async.max_pending_events)
+  }
+  if (!options.async.max_pending_events) {
     return std::unexpected(detail::async_callback_error("max_pending_events must be positive."));
+  }
   auto delivery = std::make_shared<detail::StreamDelivery>(std::move(on_event), std::move(complete),
                                                            options.async, options.stop);
   options.stop = delivery->token();
@@ -632,8 +886,9 @@ stream_tool_loop_async(LanguageModel model, GenerationRequest request, std::vect
           [delivery](Result<GenerationResponse> result) { delivery->finish(std::move(result)); },
           [delivery](const StreamEvent& event) { delivery->event(event); })
           ->start();
-  if (!started)
+  if (!started) {
     delivery->abort();
+  }
   return started;
 }
 

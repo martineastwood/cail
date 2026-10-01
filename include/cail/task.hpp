@@ -22,18 +22,20 @@ namespace detail {
 // The bridge owns the completion handler and keeps its executor alive while
 // callback-based work is pending. Always post, including inline completions.
 template <typename T, typename Start>
-Task<Result<T>> await_result(Start start, std::stop_token stop = {}) {
+Task<Result<T>> await_result(Start start, const std::stop_token& stop = {}) {
   return asio::async_initiate<decltype(asio::use_awaitable), void(Result<T>)>(
       [start = std::move(start), stop](auto handler) mutable {
         auto executor = asio::get_associated_executor(handler);
         auto slot = asio::get_associated_cancellation_slot(handler);
         std::stop_source cancelled;
         auto linked = std::make_shared<LinkedStop>(stop, cancelled.get_token());
-        if (slot.is_connected())
+        if (slot.is_connected()) {
           slot.assign([cancelled](asio::cancellation_type type) mutable {
-            if (type != asio::cancellation_type::none)
+            if (type != asio::cancellation_type::none) {
               cancelled.request_stop();
+            }
           });
+        }
         auto owned = std::make_shared<decltype(handler)>(std::move(handler));
         auto complete =
             complete_once<T>([owned, executor, slot, linked,
@@ -49,8 +51,9 @@ Task<Result<T>> await_result(Start start, std::stop_token stop = {}) {
         auto started = initiate_async<T>(complete, [&](auto done) {
           return start(std::move(done), linked->source.get_token(), std::move(callbacks));
         });
-        if (!started)
+        if (!started) {
           complete(std::unexpected(started.error()));
+        }
       },
       asio::use_awaitable);
 }

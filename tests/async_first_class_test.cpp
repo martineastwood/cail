@@ -353,9 +353,155 @@ void test_stream_retries() {
   }
 }
 
+void test_async_tool_pause_and_recovery() {
+  int calls = 0;
+  int executions = 0;
+  auto generate = [&](const cail::GenerationRequest& request, auto complete,
+                      auto) -> cail::Result<void> {
+    ++calls;
+    if (request.step == 0)
+      complete(cail::GenerationResponse{
+          .tool_calls = {{.id = "call", .name = "lookup", .arguments = "1"}},
+          .continuation_token = "provider-state"});
+    else {
+      check(request.continuation_token == "provider-state" && request.messages.size() == 1 &&
+                request.messages[0].tool_call_id == "call",
+            "async resume preserves provider continuation and tool result");
+      complete(cail::GenerationResponse{.text = "done"});
+    }
+    return {};
+  };
+  cail::LanguageModel model(
+      {}, {}, {}, generate,
+      [&](auto request, auto event, auto complete, auto stop) -> cail::Result<void> {
+        if (request.step)
+          event(cail::TextDelta{.text = "done"});
+        return generate(request, complete, stop);
+      });
+  auto tool = cail::async_tool<int, int>("lookup", "Lookup", [&](int, auto, auto complete) {
+    ++executions;
+    complete(std::unexpected(
+        cail::Error{.code = cail::ErrorCode::tool_execution, .message = "Unknown item"}));
+  });
+  std::promise<cail::Result<cail::GenerationResponse>> recovery;
+  auto recovered = recovery.get_future();
+  check(cail::run_tool_loop_async(model, {}, {tool},
+                                  [&](auto result) { recovery.set_value(std::move(result)); },
+                                  {.recover_tool_errors = true})
+            .has_value(),
+        "async recovery starts");
+  auto result = recovered.get();
+  check(result && result->tool_results[0].output == R"({"error":"Unknown item"})" &&
+            executions == 1,
+        "async tool execution errors return to the model");
+  cail::Result<cail::GenerationResponse> interrupted;
+  check(cail::run_tool_loop_async(model, {}, {tool},
+                                  [&](auto response) { interrupted = std::move(response); },
+                                  {.pause_when = [](const auto&) { return true; }})
+            .has_value(),
+        "failed resume continuation prepared");
+  cail::LanguageModel rejecting({}, {}, {}, [](auto, auto, auto) -> cail::Result<void> {
+    return std::unexpected(cail::Error{.code = cail::ErrorCode::transport, .message = "offline"});
+  });
+  bool called = false;
+  auto rejected = cail::resume_tool_loop_async(
+      rejecting, *interrupted->tool_continuation,
+      {{.call_id = "call", .name = "lookup", .output = "2"}}, [&](auto) { called = true; });
+  check(!rejected && !called && rejected.error().partial_response &&
+            rejected.error().partial_response->steps.size() == 1 &&
+            rejected.error().partial_response->tool_results.size() == 1,
+        "async resume initiation failures preserve accepted results without invoking completion");
+
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  cail::Agent agent(
+      {.model = model, .tools = {tool}, .memory = memory, .conversation_id = "paused"});
+  std::promise<cail::Result<cail::GenerationResponse>> memory_pause;
+  auto memory_result = memory_pause.get_future();
+  check(agent
+            .generate_async("look up",
+                            [&](auto response) { memory_pause.set_value(std::move(response)); },
+                            {.pause_when = [](const auto&) { return true; }})
+            .has_value(),
+        "memory-backed async pause starts");
+  auto pending = memory_result.get();
+  check(pending && pending->tool_continuation && memory->load("paused")->empty(),
+        "async paused turns are not saved");
+  std::promise<cail::Result<cail::GenerationResponse>> second_pause;
+  auto second_result = second_pause.get_future();
+  check(agent
+            .generate_async("try again",
+                            [&](auto response) { second_pause.set_value(std::move(response)); },
+                            {.pause_when = [](const auto&) { return true; }})
+            .has_value(),
+        "second paused turn starts");
+  check(second_result.get().has_value(), "async paused turns release the conversation lease");
+
+  for (const bool streaming : {false, true}) {
+    cail::Result<cail::GenerationResponse> paused;
+    check(cail::run_tool_loop_async(model, {}, {tool},
+                                    [&](auto response) { paused = std::move(response); },
+                                    {.pause_when = [](const auto&) { return true; }})
+              .has_value(),
+          "coroutine continuation prepared");
+    const std::vector<cail::ToolResult> outputs{
+        {.call_id = "call", .name = "lookup", .output = "2"}};
+    std::string text;
+    auto task = streaming
+                    ? cail::resume_stream_tool_loop_async(
+                          model, paused->tool_continuation, outputs,
+                          [&](const auto& event) { text += std::get<cail::TextDelta>(event).text; })
+                    : cail::resume_tool_loop_async(model, paused->tool_continuation, outputs);
+    auto resumed = cail::run(std::move(task));
+    check(resumed && resumed->text == "done" && (!streaming || text == "done"),
+          "coroutines resume generation and streams");
+  }
+  check(!cail::run(
+            cail::resume_tool_loop_async(model, std::shared_ptr<cail::ToolContinuation>{}, {})),
+        "coroutine resume rejects a null continuation");
+  for (const bool streaming : {false, true}) {
+    cail::Result<cail::GenerationResponse> paused;
+    const auto options = cail::ToolLoopOptions{.pause_when = [](const auto&) { return true; }};
+    auto complete = [&](auto response) { paused = std::move(response); };
+    auto started = streaming ? cail::stream_tool_loop_async(
+                                   model, {}, {tool}, [](const auto&) {}, complete, options)
+                             : cail::run_tool_loop_async(model, {}, {tool}, complete, options);
+    check(started && paused && paused->tool_continuation && executions == 1,
+          "async generation and streaming pause before tool execution");
+    if (!paused || !paused->tool_continuation)
+      continue;
+    std::deque<std::function<void()>> scheduled;
+    std::string delivered;
+    cail::AsyncOptions async{.schedule = [&](auto task) { scheduled.push_back(std::move(task)); }};
+    const std::vector<cail::ToolResult> results{
+        {.call_id = "call", .name = "lookup", .output = "2"}};
+    auto done = [&](auto response) {
+      check(response && response->steps.size() == 2 && response->tool_results.size() == 1,
+            "async resume preserves earlier progress");
+      delivered += "!";
+    };
+    started =
+        streaming
+            ? cail::resume_stream_tool_loop_async(
+                  model, *paused->tool_continuation, results,
+                  [&](const auto& event) { delivered += std::get<cail::TextDelta>(event).text; },
+                  done, {}, async)
+            : cail::resume_tool_loop_async(model, *paused->tool_continuation, results, done, {},
+                                           async);
+    check(started && delivered.empty() && scheduled.size() == 1,
+          "async resume respects callback scheduling");
+    while (!scheduled.empty()) {
+      auto task = std::move(scheduled.front());
+      scheduled.pop_front();
+      task();
+    }
+    check(delivered == (streaming ? "done!" : "!"), "resumed events precede completion");
+  }
+}
+
 } // namespace test
 
 int main() {
+  test::test_async_tool_pause_and_recovery();
   test::test_scheduling();
   test::test_agent_streaming_memory();
   test::test_agent_memory_cancellation();

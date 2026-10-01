@@ -17,41 +17,49 @@ EmbeddingClient::EmbeddingClient(EmbeddingClientSettings settings)
     : settings_(std::move(settings)) {}
 
 Result<EmbeddingBatch> EmbeddingClient::embed_many(const std::vector<std::string>& inputs,
-                                                   std::stop_token stop) const {
-  if (stop.stop_requested())
+                                                   const std::stop_token& stop) const {
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto http = make_http_request(inputs);
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   auto response = settings_.transport->send(*http, stop);
-  if (stop.stop_requested())
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
-  if (!response)
+  }
+  if (!response) {
     return std::unexpected(response.error());
+  }
   return decode_http_response(*response, inputs.size());
 }
 
-Result<void> EmbeddingClient::embed_many_async(std::vector<std::string> inputs,
+Result<void> EmbeddingClient::embed_many_async(const std::vector<std::string>& inputs,
                                                EmbeddingModel::BatchCompletion complete,
-                                               std::stop_token stop) const {
-  if (stop.stop_requested())
+                                               const std::stop_token& stop) const {
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
-  if (!complete)
+  }
+  if (!complete) {
     return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                  .message = "Async embeddings require a completion handler."});
+  }
   auto http = make_http_request(inputs);
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   settings_.transport->send_async(
       std::move(*http),
       [this, input_count = inputs.size(), complete = std::move(complete),
        stop](Result<HttpResponse> response) {
-        if (stop.stop_requested())
+        if (stop.stop_requested()) {
           complete(std::unexpected(generation_cancelled_error()));
-        else if (!response)
+        } else if (!response) {
           complete(std::unexpected(response.error()));
-        else
+        } else {
           complete(decode_http_response(*response, input_count));
+        }
       },
       stop);
   return {};
@@ -67,8 +75,9 @@ EmbeddingClient::make_http_request(const std::vector<std::string>& inputs) const
   }
   auto encoded = to_json(EmbeddingRequestBody{
       .model = settings_.model, .input = inputs, .dimensions = settings_.dimensions});
-  if (!encoded)
+  if (!encoded) {
     return std::unexpected(encoded.error());
+  }
   std::vector<HttpHeader> headers;
   if (!settings_.api_key.empty()) {
     headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
@@ -123,17 +132,19 @@ namespace cail::detail {
 
 [[nodiscard]] EmbeddingModel make_embedding_model(EmbeddingClientSettings settings) {
   auto client = std::make_shared<EmbeddingClient>(std::move(settings));
-  return EmbeddingModel{[client](const std::vector<std::string>& inputs, std::stop_token stop) {
-                          return client->embed_many(inputs, stop);
-                        },
-                        [client](std::vector<std::string> inputs,
-                                 EmbeddingModel::BatchCompletion complete, std::stop_token stop) {
-                          return client->embed_many_async(
-                              std::move(inputs),
-                              [client, complete = std::move(complete)](
-                                  Result<EmbeddingBatch> result) { complete(std::move(result)); },
-                              stop);
-                        }};
+  return EmbeddingModel{
+      [client](const std::vector<std::string>& inputs, const std::stop_token& stop) {
+        return client->embed_many(inputs, stop);
+      },
+      [client](const std::vector<std::string>& inputs, EmbeddingModel::BatchCompletion complete,
+               const std::stop_token& stop) {
+        return client->embed_many_async(
+            inputs,
+            [client, complete = std::move(complete)](Result<EmbeddingBatch> result) {
+              complete(std::move(result));
+            },
+            stop);
+      }};
 }
 
 [[nodiscard]] EmbeddingModel

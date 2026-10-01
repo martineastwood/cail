@@ -65,7 +65,7 @@ public:
   }
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
-                                                    std::stop_token stop = {}) const {
+                                                    const std::stop_token& stop = {}) const {
     if (!generate_) {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
@@ -80,8 +80,8 @@ public:
 
   [[nodiscard]] Result<void> generate_async(GenerationRequest request,
                                             GenerationCompletion complete,
-                                            std::stop_token stop = {},
-                                            AsyncOptions options = {}) const {
+                                            const std::stop_token& stop = {},
+                                            const AsyncOptions& options = {}) const {
     if (!generate_async_ || !complete) {
       return std::unexpected(
           Error{.code = ErrorCode::invalid_configuration,
@@ -96,30 +96,34 @@ public:
   }
 
   [[nodiscard]] Task<Result<GenerationResponse>> generate_async(GenerationRequest request,
-                                                                std::stop_token stop = {},
+                                                                const std::stop_token& stop = {},
                                                                 AsyncOptions options = {}) const {
     return detail::await_result<GenerationResponse>(
         [model = *this, request = std::move(request),
-         options = std::move(options)](auto complete, auto token, auto) mutable {
-          return model.generate_async(std::move(request), std::move(complete), token,
+         options = std::move(options)](auto complete, const auto& token, const auto&) mutable {
+          return model.generate_async(std::move(request), std::move(complete), std::move(token),
                                       std::move(options));
         },
-        stop);
+        std::move(stop));
   }
 
   // Events run serially. Inline handlers gate further reads; scheduled handlers
   // use a bounded queue and completion follows all delivered events.
   [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
-                                          GenerationCompletion complete, std::stop_token stop = {},
+                                          GenerationCompletion complete,
+                                          const std::stop_token& stop = {},
                                           AsyncOptions options = {}) const {
-    if (!stream_async_ || !on_event || !complete)
+    if (!stream_async_ || !on_event || !complete) {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
           .message = "Async streaming requires a capable model, event and completion handlers."});
-    if (stop.stop_requested())
+    }
+    if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
-    if (!options.max_pending_events)
+    }
+    if (!options.max_pending_events) {
       return std::unexpected(detail::async_callback_error("max_pending_events must be positive."));
+    }
     auto delivery = std::make_shared<detail::StreamDelivery>(
         std::move(on_event), std::move(complete), std::move(options), stop);
     auto started = detail::initiate_async<GenerationResponse>(
@@ -129,29 +133,31 @@ public:
               std::move(request), [delivery](const StreamEvent& event) { delivery->event(event); },
               std::move(done), delivery->token());
         });
-    if (!started)
+    if (!started) {
       delivery->abort();
+    }
     return started;
   }
 
   [[nodiscard]] Task<Result<GenerationResponse>> stream_async(GenerationRequest request,
                                                               StreamHandler on_event,
-                                                              std::stop_token stop = {},
+                                                              const std::stop_token& stop = {},
                                                               AsyncOptions options = {}) const {
     return detail::await_result<GenerationResponse>(
         [model = *this, request = std::move(request), on_event = std::move(on_event),
-         options = std::move(options)](auto complete, auto token, auto callbacks) mutable {
-          if (!options.schedule)
+         options = std::move(options)](auto complete, const auto& token, auto callbacks) mutable {
+          if (!options.schedule) {
             options.schedule = std::move(callbacks.schedule);
+          }
           return model.stream_async(std::move(request), std::move(on_event), std::move(complete),
-                                    token, std::move(options));
+                                    std::move(token), std::move(options));
         },
-        stop);
+        std::move(stop));
   }
 
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& on_event,
-                                                  std::stop_token stop = {}) const {
+                                                  const std::stop_token& stop = {}) const {
     if (!stream_) {
       return std::unexpected(Error{
           .code = ErrorCode::invalid_configuration,
@@ -164,14 +170,16 @@ public:
           .message = "Streaming requires an event handler.",
       });
     }
-    if (stop.stop_requested())
+    if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     return stream_(request, on_event, stop);
   }
 
-  [[nodiscard]] Result<GenerationResponse>
-  stream(std::string_view prompt, const StreamHandler& on_event, std::stop_token stop = {}) const {
-    return stream(detail::user_prompt_request(prompt), on_event, stop);
+  [[nodiscard]] Result<GenerationResponse> stream(std::string_view prompt,
+                                                  const StreamHandler& on_event,
+                                                  const std::stop_token& stop = {}) const {
+    return stream(detail::user_prompt_request(prompt), on_event, std::move(stop));
   }
 
 private:

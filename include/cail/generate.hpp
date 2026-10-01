@@ -73,16 +73,18 @@ prepare_generation_request(GenerateTextOptions& options) {
 
 [[nodiscard]] inline Result<GenerationResponse> generate_text(GenerateTextOptions options) {
   auto request = detail::prepare_generation_request(options);
-  if (!request)
+  if (!request) {
     return std::unexpected(request.error());
+  }
   return run_tool_loop(options.model, std::move(*request), options.tools, options.tool_loop);
 }
 
 [[nodiscard]] inline Result<GenerationResponse> stream_text(GenerateTextOptions options,
                                                             const StreamHandler& on_event) {
   auto request = detail::prepare_generation_request(options);
-  if (!request)
+  if (!request) {
     return std::unexpected(request.error());
+  }
   if (!on_event) {
     return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                  .message = "Text streaming requires an event handler."});
@@ -94,8 +96,9 @@ prepare_generation_request(GenerateTextOptions& options) {
 [[nodiscard]] inline Result<void>
 generate_text_async(GenerateTextOptions options, LanguageModel::GenerationCompletion complete) {
   auto request = detail::prepare_generation_request(options);
-  if (!request)
+  if (!request) {
     return std::unexpected(request.error());
+  }
   return run_tool_loop_async(std::move(options.model), std::move(*request),
                              std::move(options.tools), std::move(complete),
                              std::move(options.tool_loop));
@@ -105,8 +108,9 @@ generate_text_async(GenerateTextOptions options, LanguageModel::GenerationComple
                                                     StreamHandler on_event,
                                                     LanguageModel::GenerationCompletion complete) {
   auto request = detail::prepare_generation_request(options);
-  if (!request)
+  if (!request) {
     return std::unexpected(request.error());
+  }
   return stream_tool_loop_async(std::move(options.model), std::move(*request),
                                 std::move(options.tools), std::move(on_event), std::move(complete),
                                 std::move(options.tool_loop));
@@ -116,8 +120,8 @@ generate_text_async(GenerateTextOptions options, LanguageModel::GenerationComple
 generate_text_async(GenerateTextOptions options) {
   const auto stop = options.tool_loop.stop;
   return detail::await_result<GenerationResponse>(
-      [options = std::move(options)](auto complete, auto token, auto) mutable {
-        options.tool_loop.stop = token;
+      [options = std::move(options)](auto complete, const auto& token, const auto&) mutable {
+        options.tool_loop.stop = std::move(token);
         return generate_text_async(std::move(options), std::move(complete));
       },
       stop);
@@ -129,9 +133,10 @@ generate_text_async(GenerateTextOptions options) {
   return detail::await_result<GenerationResponse>(
       [options = std::move(options), on_event = std::move(on_event)](auto complete, auto token,
                                                                      auto callbacks) mutable {
-        options.tool_loop.stop = token;
-        if (!options.tool_loop.async.schedule)
+        options.tool_loop.stop = std::move(token);
+        if (!options.tool_loop.async.schedule) {
           options.tool_loop.async.schedule = std::move(callbacks.schedule);
+        }
         return stream_text_async(std::move(options), std::move(on_event), std::move(complete));
       },
       stop);
@@ -175,10 +180,11 @@ template <typename T> [[nodiscard]] Result<T> generate_object(GenerateTextOption
 template <typename T>
 [[nodiscard]] Result<void> generate_object_async(GenerateTextOptions options,
                                                  std::function<void(Result<T>)> complete) {
-  if (!complete)
+  if (!complete) {
     return std::unexpected(
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Async object generation requires a completion handler."});
+  }
   options.structured_output = StructuredOutput{.name = "cail_output", .schema = schema<T>()};
   return generate_text_async(std::move(options),
                              [complete = std::move(complete)](Result<GenerationResponse> response) {
@@ -190,7 +196,7 @@ template <typename T>
 [[nodiscard]] Task<Result<T>> generate_object_async(GenerateTextOptions options) {
   const auto stop = options.tool_loop.stop;
   return detail::await_result<T>(
-      [options = std::move(options)](auto complete, auto token, auto) mutable {
+      [options = std::move(options)](auto complete, const auto& token, const auto&) mutable {
         options.tool_loop.stop = token;
         return generate_object_async<T>(std::move(options), std::move(complete));
       },

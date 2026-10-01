@@ -67,15 +67,15 @@ public:
   }
 
   [[nodiscard]] EmbeddingModel
-  embedding_model(std::string model_id,
+  embedding_model(const std::string& model_id,
                   std::optional<std::size_t> dimensions = std::nullopt) const {
     auto endpoint = embeddings_endpoint_from(settings_.endpoint);
     if (!endpoint) {
       const auto error = endpoint.error();
-      return EmbeddingModel{
-          [error](const std::vector<std::string>&, std::stop_token) -> Result<EmbeddingBatch> {
-            return std::unexpected(error);
-          }};
+      return EmbeddingModel{[error](const std::vector<std::string>&,
+                                    const std::stop_token&) -> Result<EmbeddingBatch> {
+        return std::unexpected(error);
+      }};
     }
     return make_embedding_model(EmbeddingClientSettings{
         .endpoint = std::move(*endpoint),

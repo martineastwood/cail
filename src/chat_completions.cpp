@@ -28,20 +28,24 @@ void append_content(const glz::generic& value, ContentText& output, bool thinkin
   if (const auto* string = value.get_if<std::string>()) {
     (thinking ? output.reasoning : output.text) += *string;
   } else if (const auto* array = value.get_if<glz::generic::array_t>()) {
-    for (const auto& item : *array)
+    for (const auto& item : *array) {
       append_content(item, output, thinking);
+    }
   } else if (value.is_object()) {
     if (value.contains("type")) {
-      if (const auto* type = value["type"].get_if<std::string>())
+      if (const auto* type = value["type"].get_if<std::string>()) {
         thinking |= *type == "thinking" || *type == "reasoning";
+      }
     }
     for (const auto* key : {"thinking", "text", "content", "reasoning", "reasoning_content"}) {
-      if (!value.contains(key))
+      if (!value.contains(key)) {
         continue;
+      }
       const auto key_view = std::string_view(key);
       const bool reasoning_key = key_view == "reasoning" || key_view == "reasoning_content";
-      if (reasoning_key && !thinking)
+      if (reasoning_key && !thinking) {
         continue;
+      }
       append_content(value[key], output, thinking || key_view == "thinking" || reasoning_key);
     }
   }
@@ -49,9 +53,10 @@ void append_content(const glz::generic& value, ContentText& output, bool thinkin
 
 Result<ContentText> decode_content(const glz::raw_json& raw) {
   glz::generic value;
-  if (const auto error = glz::read_json(value, raw.str); error)
+  if (const auto error = glz::read_json(value, raw.str); error) {
     return std::unexpected(
         Error{.code = ErrorCode::provider_response, .message = glz::format_error(error, raw.str)});
+  }
   ContentText output;
   append_content(value, output);
   return output;
@@ -97,20 +102,23 @@ Result<GenerationResponse> decode(const ResponseBody& body, bool retain_reasonin
   GenerationResponse result;
   if (message.content) {
     auto content = decode_content(*message.content);
-    if (!content)
+    if (!content) {
       return std::unexpected(content.error());
+    }
     result.text = std::move(content->text);
     result.reasoning = std::move(content->reasoning);
   }
-  if (message.refusal)
+  if (message.refusal) {
     result.text = *message.refusal;
+  }
   result.reasoning += message.reasoning_content.value_or("");
   result.provider_options = round_trip_options(
       retain_reasoning_content, message.reasoning_content.value_or(""),
       message.reasoning_details ? std::optional<std::string>{message.reasoning_details->str}
                                 : std::nullopt);
-  if (message.refusal)
+  if (message.refusal) {
     result.status = GenerationStatus::refused;
+  }
   cail::detail::apply_finish_reason(result, choice.finish_reason);
   if (message.tool_calls) {
     for (const auto& call : *message.tool_calls) {
@@ -137,8 +145,9 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
   if (auto valid = cail::detail::validate_pdf_parts(request, false); !valid) {
     return std::unexpected(valid.error());
   }
-  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 4); !valid)
+  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 4); !valid) {
     return std::unexpected(valid.error());
+  }
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -156,11 +165,13 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
   body.max_tokens = request.max_output_tokens;
   body.temperature = request.temperature;
   body.top_p = request.top_p;
-  if (request.tool_choice)
+  if (request.tool_choice) {
     body.tool_choice = cail::detail::encode_tool_choice(
         *request.tool_choice, cail::detail::ToolChoiceFormat::chat_completions);
-  if (!request.stop_sequences.empty())
+  }
+  if (!request.stop_sequences.empty()) {
     body.stop = request.stop_sequences;
+  }
   if (streaming) {
     body.stream = true;
     if (request.stream_usage.value_or(true)) {
@@ -169,11 +180,13 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
   }
   if (request.structured_output) {
     auto schema = cail::detail::strict_json_schema(request.structured_output->schema);
-    if (!schema)
+    if (!schema) {
       return std::unexpected(schema.error());
+    }
     auto encoded = to_json(*schema);
-    if (!encoded)
+    if (!encoded) {
       return std::unexpected(encoded.error());
+    }
     body.response_format = RequestBody::ResponseFormat{
         .json_schema =
             RequestBody::JsonSchema{
@@ -184,18 +197,20 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
     };
   }
   const auto append_message =
-      [&body, retain_reasoning_content](InputMessage item,
+      [&body, retain_reasoning_content](const InputMessage& item,
                                         ProviderOptions provider_options) -> Result<void> {
     if (!retain_reasoning_content) {
       provider_options.erase("reasoning_content");
     }
     auto encoded = to_json(item);
-    if (!encoded)
+    if (!encoded) {
       return std::unexpected(encoded.error());
+    }
     if (!provider_options.empty()) {
       auto merged = merge_json_objects(*encoded, provider_options);
-      if (!merged)
+      if (!merged) {
         return std::unexpected(merged.error());
+      }
       encoded = std::move(*merged);
     }
     body.messages.emplace_back(std::move(*encoded));
@@ -203,23 +218,27 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
   };
   std::vector<glz::raw_json> pending_tool_images;
   const auto flush_tool_images = [&]() -> Result<void> {
-    if (pending_tool_images.empty())
+    if (pending_tool_images.empty()) {
       return {};
+    }
     auto encoded = to_json(pending_tool_images);
-    if (!encoded)
+    if (!encoded) {
       return std::unexpected(encoded.error());
+    }
     auto user_message =
         to_json(InputMessage{.role = "user", .content = glz::raw_json{std::move(*encoded)}});
-    if (!user_message)
+    if (!user_message) {
       return std::unexpected(user_message.error());
+    }
     body.messages.emplace_back(std::move(*user_message));
     pending_tool_images.clear();
     return {};
   };
   for (const auto& message : request.messages) {
     if (message.role != MessageRole::tool) {
-      if (auto flushed = flush_tool_images(); !flushed)
+      if (auto flushed = flush_tool_images(); !flushed) {
         return std::unexpected(flushed.error());
+      }
     }
     InputMessage item;
     switch (message.role) {
@@ -282,28 +301,32 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
           auto encoded =
               to_json(ImagePart{.image_url = ImageUrl{.url = cail::detail::image_data_url(
                                                           image.mime_type, image.bytes)}});
-          if (!encoded)
+          if (!encoded) {
             return std::unexpected(encoded.error());
+          }
           auto provider_part_options = image.provider_options;
           if (!provider_part_options.empty()) {
             auto merged = merge_json_objects(*encoded, provider_part_options);
-            if (!merged)
+            if (!merged) {
               return std::unexpected(merged.error());
+            }
             encoded = std::move(*merged);
           }
           pending_tool_images.emplace_back(std::move(*encoded));
         }
       }
       auto encoded = to_json(text);
-      if (!encoded)
+      if (!encoded) {
         return std::unexpected(encoded.error());
+      }
       item.content = glz::raw_json{std::move(*encoded)};
     } else if (message.content.size() == 1 &&
                std::holds_alternative<cail::TextPart>(message.content.front()) &&
                std::get<cail::TextPart>(message.content.front()).provider_options.empty()) {
       auto encoded = to_json(std::get<cail::TextPart>(message.content.front()).text);
-      if (!encoded)
+      if (!encoded) {
         return std::unexpected(encoded.error());
+      }
       item.content = glz::raw_json{std::move(*encoded)};
     } else if (!message.content.empty()) {
       const bool has_image =
@@ -334,20 +357,24 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
             encoded = merge_json_objects(*encoded, image->provider_options);
           }
         }
-        if (!encoded)
+        if (!encoded) {
           return std::unexpected(encoded.error());
+        }
         parts.emplace_back(std::move(*encoded));
       }
       auto encoded = to_json(parts);
-      if (!encoded)
+      if (!encoded) {
         return std::unexpected(encoded.error());
+      }
       item.content = glz::raw_json{std::move(*encoded)};
     }
-    if (auto added = append_message(std::move(item), message.provider_options); !added)
+    if (auto added = append_message(std::move(item), message.provider_options); !added) {
       return std::unexpected(added.error());
+    }
   }
-  if (auto flushed = flush_tool_images(); !flushed)
+  if (auto flushed = flush_tool_images(); !flushed) {
     return std::unexpected(flushed.error());
+  }
   if (!request.tools.empty()) {
     body.tools.emplace();
     for (const auto& tool : request.tools) {
@@ -356,19 +383,22 @@ Result<RequestBody> encode(const GenerationRequest& request, std::string model, 
                                      .message = "Tool names cannot be empty."});
       }
       auto parameters = to_json(tool.parameters);
-      if (!parameters)
+      if (!parameters) {
         return std::unexpected(parameters.error());
+      }
       auto encoded =
           to_json(ToolDefinition{.function = ToolDefinition::Function{
                                      .name = tool.name,
                                      .description = tool.description,
                                      .parameters = glz::raw_json{std::move(*parameters)}}});
-      if (!encoded)
+      if (!encoded) {
         return std::unexpected(encoded.error());
+      }
       if (!tool.provider_options.empty()) {
         auto merged = merge_json_objects(*encoded, tool.provider_options);
-        if (!merged)
+        if (!merged) {
           return std::unexpected(merged.error());
+        }
         encoded = std::move(*merged);
       }
       body.tools->emplace_back(std::move(*encoded));
@@ -394,8 +424,9 @@ struct Client::StreamState {
   bool done = false;
   std::optional<Error> stream_error;
   void handle_event(const cail::detail::ServerSentEvent& event) {
-    if (stop.stop_requested() || stream_error || event.data.empty())
+    if (stop.stop_requested() || stream_error || event.data.empty()) {
       return;
+    }
     if (event.data == "[DONE]") {
       done = true;
       return;
@@ -419,8 +450,9 @@ struct Client::StreamState {
       on_event(StreamEvent{UsageUpdate{.usage = *partial.usage}});
     }
     for (const auto& choice : chunk.choices) {
-      if (choice.index != 0)
+      if (choice.index != 0) {
         continue;
+      }
       if (choice.delta) {
         const auto& delta = *choice.delta;
         if (delta.content) {
@@ -476,12 +508,15 @@ struct Client::StreamState {
             const auto& call = (*delta.tool_calls)[index];
             const auto call_index = call.index.value_or(index);
             auto& pending = pending_calls[call_index];
-            if (call.id && !call.id->empty())
+            if (call.id && !call.id->empty()) {
               pending.id = *call.id;
-            if (!call.function)
+            }
+            if (!call.function) {
               continue;
-            if (call.function->name && !call.function->name->empty())
+            }
+            if (call.function->name && !call.function->name->empty()) {
               pending.name = *call.function->name;
+            }
             if (call.function->arguments && !call.function->arguments->empty()) {
               pending.arguments += *call.function->arguments;
               on_event(StreamEvent{ToolCallArgumentsDelta{.output_index = call_index,
@@ -500,8 +535,9 @@ struct Client::StreamState {
     parser.feed(bytes, [this](const auto& event) { handle_event(event); });
   }
   Result<GenerationResponse> finish(const HttpResponse& response) {
-    if (stop.stop_requested())
+    if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     const auto context = [&](Error error) {
       return unexpected_with_http_context<GenerationResponse>(std::move(error), response);
     };
@@ -509,24 +545,28 @@ struct Client::StreamState {
       return context(http_status_error_from_json_body(response));
     }
     parser.finish([this](const auto& event) { handle_event(event); });
-    if (stream_error)
+    if (stream_error) {
       return context(*stream_error);
-    if (!done || !finished)
+    }
+    if (!done || !finished) {
       return context(
           Error{.code = ErrorCode::provider_response,
                 .message = "Chat Completions closed before the final choice and [DONE]."});
+    }
     for (const auto& [index, call] : pending_calls) {
-      if (call.id.empty() || call.name.empty())
+      if (call.id.empty() || call.name.empty()) {
         return context(Error{.code = ErrorCode::provider_response,
                              .message = "Chat Completions returned an incomplete tool call."});
+      }
       partial.tool_calls.push_back(call);
       on_event(StreamEvent{ToolCallReady{.output_index = index, .call = call}});
     }
     std::optional<std::string> details_json;
     if (!reasoning_details.empty()) {
       auto encoded_details = to_json(reasoning_details);
-      if (!encoded_details)
+      if (!encoded_details) {
         return context(encoded_details.error());
+      }
       details_json = std::move(*encoded_details);
     }
     partial.provider_options =
@@ -540,13 +580,13 @@ Client::Client(cail::ChatCompletionsSettings settings, std::string model,
     : settings_(std::move(settings)), model_(std::move(model)), transport_(std::move(transport)) {}
 
 Result<GenerationResponse> Client::generate(const GenerationRequest& request,
-                                            std::stop_token stop) const {
+                                            const std::stop_token& stop) const {
   return run(request, {}, stop);
 }
 
 Result<void> Client::generate_async(GenerationRequest request,
                                     LanguageModel::GenerationCompletion complete,
-                                    std::stop_token stop) const {
+                                    const std::stop_token& stop) const {
   if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
   }
@@ -563,22 +603,25 @@ Result<void> Client::generate_async(GenerationRequest request,
 
 Result<GenerationResponse> Client::stream(const GenerationRequest& request,
                                           const StreamHandler& on_event,
-                                          std::stop_token stop) const {
+                                          const std::stop_token& stop) const {
   return run(request, on_event, stop);
 }
 
 Result<void> Client::stream_async(GenerationRequest request, StreamHandler on_event,
                                   LanguageModel::GenerationCompletion complete,
-                                  std::stop_token stop) const {
-  if (!on_event || !complete)
+                                  const std::stop_token& stop) const {
+  if (!on_event || !complete) {
     return std::unexpected(
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Async streaming requires event and completion handlers."});
-  if (stop.stop_requested())
+  }
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto http = make_http_request(request, true);
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   auto state = std::make_shared<StreamState>();
   state->on_event = std::move(on_event);
   state->stop = stop;
@@ -591,40 +634,49 @@ Result<void> Client::stream_async(GenerationRequest request, StreamHandler on_ev
 
 Result<HttpRequest> Client::make_http_request(const GenerationRequest& request,
                                               bool streaming) const {
-  if (settings_.endpoint.empty() || !transport_)
+  if (settings_.endpoint.empty() || !transport_) {
     return std::unexpected(
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Chat Completions requires an endpoint and transport."});
+  }
   auto body = encode(request, model_, streaming, settings_.retain_reasoning_content);
-  if (!body)
+  if (!body) {
     return std::unexpected(body.error());
+  }
   auto encoded = to_json(*body);
-  if (!encoded)
+  if (!encoded) {
     return std::unexpected(encoded.error());
+  }
   if (!request.session_id.empty() && (settings_.prompt_cache_key || settings_.session_body)) {
     glz::generic routing = glz::generic::object_t{};
-    if (settings_.session_body)
+    if (settings_.session_body) {
       routing["session_id"] = request.session_id;
-    if (settings_.prompt_cache_key)
+    }
+    if (settings_.prompt_cache_key) {
       routing["prompt_cache_key"] = request.session_id;
+    }
     auto merged = merge_json_objects(*encoded, routing.get<glz::generic::object_t>());
-    if (!merged)
+    if (!merged) {
       return std::unexpected(merged.error());
+    }
     encoded = std::move(*merged);
   }
   if (!request.provider_options.empty()) {
     auto merged = merge_json_objects(*encoded, request.provider_options);
-    if (!merged)
+    if (!merged) {
       return std::unexpected(merged.error());
+    }
     encoded = std::move(*merged);
   }
   HttpRequest http{
       .url = settings_.endpoint, .headers = settings_.headers, .body = std::move(*encoded)};
   http.headers.push_back({.name = "Content-Type", .value = "application/json"});
-  if (!settings_.api_key.empty())
+  if (!settings_.api_key.empty()) {
     http.headers.push_back({.name = "Authorization", .value = "Bearer " + settings_.api_key});
-  if (streaming)
+  }
+  if (streaming) {
     http.headers.push_back({.name = "Accept", .value = "text/event-stream"});
+  }
   cail::detail::append_session_header(http.headers, settings_.request_session_header,
                                       request.session_id);
   if (auto middleware = cail::detail::run_before_request(request, http); !middleware) {
@@ -644,20 +696,24 @@ Result<GenerationResponse> Client::decode_http_response(const HttpResponse& resp
   ResponseBody parsed;
   if (const auto error =
           glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, response.body);
-      error)
+      error) {
     return context(Error{.code = ErrorCode::provider_response,
                          .message = glz::format_error(error, response.body)});
+  }
   auto result = decode(parsed, retain_reasoning);
   return result ? result : context(result.error());
 }
 
 Result<GenerationResponse> Client::run(const GenerationRequest& request,
-                                       const StreamHandler& on_event, std::stop_token stop) const {
-  if (stop.stop_requested())
+                                       const StreamHandler& on_event,
+                                       const std::stop_token& stop) const {
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto http = make_http_request(request, static_cast<bool>(on_event));
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   StreamState state;
   state.on_event = on_event;
   state.stop = stop;
@@ -666,12 +722,15 @@ Result<GenerationResponse> Client::run(const GenerationRequest& request,
                       ? transport_->stream(
                             *http, [&state](std::string_view bytes) { state.feed(bytes); }, stop)
                       : transport_->send(*http, stop);
-  if (!response)
+  if (!response) {
     return std::unexpected(response.error());
-  if (auto middleware = cail::detail::run_after_response(request, *response); !middleware)
+  }
+  if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
     return std::unexpected(middleware.error());
-  if (stop.stop_requested())
+  }
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   return on_event ? state.finish(*response)
                   : decode_http_response(*response, settings_.retain_reasoning_content);
 }
@@ -689,14 +748,14 @@ LanguageModel ChatCompletionsProvider::operator()(std::string model_id,
   auto client = std::make_shared<detail::chat_completions::Client>(settings_, std::move(model_id),
                                                                    std::move(transport));
   return LanguageModel{
-      [client](const GenerationRequest& request, std::stop_token stop) {
+      [client](const GenerationRequest& request, const std::stop_token& stop) {
         return client->generate(request, stop);
       },
       [client](const GenerationRequest& request, const StreamHandler& handler,
-               std::stop_token stop) { return client->stream(request, handler, stop); },
+               const std::stop_token& stop) { return client->stream(request, handler, stop); },
       chat_completions_adapter_capabilities(),
       [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
-               std::stop_token stop) {
+               const std::stop_token& stop) {
         return client->generate_async(
             std::move(request),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {
@@ -705,7 +764,7 @@ LanguageModel ChatCompletionsProvider::operator()(std::string model_id,
             stop);
       },
       [client](GenerationRequest request, StreamHandler handler,
-               LanguageModel::GenerationCompletion complete, std::stop_token stop) {
+               LanguageModel::GenerationCompletion complete, const std::stop_token& stop) {
         return client->stream_async(
             std::move(request), std::move(handler),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {

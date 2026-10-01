@@ -24,22 +24,23 @@ public:
   Client(Config config, std::unique_ptr<HttpTransport> transport);
 
   [[nodiscard]] Result<GenerationResponse> generate(const GenerationRequest& request,
-                                                    std::stop_token stop = {}) const;
+                                                    const std::stop_token& stop = {}) const;
 
   [[nodiscard]] Result<GenerationResponse> stream(const GenerationRequest& request,
                                                   const StreamHandler& on_event,
-                                                  std::stop_token stop = {}) const;
+                                                  const std::stop_token& stop = {}) const;
 
-  [[nodiscard]] Result<GenerationResponse>
-  stream(std::string_view prompt, const StreamHandler& on_event, std::stop_token stop = {}) const;
+  [[nodiscard]] Result<GenerationResponse> stream(std::string_view prompt,
+                                                  const StreamHandler& on_event,
+                                                  const std::stop_token& stop = {}) const;
 
   [[nodiscard]] Result<void> generate_async(GenerationRequest request,
                                             LanguageModel::GenerationCompletion complete,
-                                            std::stop_token stop = {}) const;
+                                            const std::stop_token& stop = {}) const;
 
   [[nodiscard]] Result<void> stream_async(GenerationRequest request, StreamHandler on_event,
                                           LanguageModel::GenerationCompletion complete,
-                                          std::stop_token stop = {}) const;
+                                          const std::stop_token& stop = {}) const;
 
 private:
   struct StreamState;
@@ -52,7 +53,7 @@ private:
 
   [[nodiscard]] Result<GenerationResponse> generate_impl(const GenerationRequest& request,
                                                          const StreamHandler& on_event,
-                                                         std::stop_token stop = {}) const;
+                                                         const std::stop_token& stop = {}) const;
 
 public:
   [[nodiscard]] Result<GenerationResponse> generate(std::string_view prompt) const;

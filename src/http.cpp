@@ -67,34 +67,38 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
 
   // All operation state and socket operations run on the client's strand.
   void finish() {
-    if (std::exchange(finished, true))
+    if (std::exchange(finished, true)) {
       return;
+    }
     Result<HttpResponse> result;
-    if (stop.stop_requested())
+    if (stop.stop_requested()) {
       result = std::unexpected(http_request_cancelled_error());
-    else if (callback_error)
+    } else if (callback_error) {
       result = std::unexpected(Error{.code = ErrorCode::transport,
                                      .message = "The HTTP stream callback threw an exception."});
-    else if (error)
+    } else if (error) {
       result = std::unexpected(Error{.code = ErrorCode::transport, .message = error->message()});
-    else
+    } else {
       result = std::move(response);
+    }
     connection.reset();
     cancel.reset();
     complete(std::move(result));
   }
 
   void start(HttpRequest request) {
-    if (finished)
+    if (finished) {
       return;
+    }
     const auto executor = client->get_executor();
     cancel.emplace(stop, [weak = weak_from_this(), executor] {
       asio::post(executor, [weak] {
         if (auto active = weak.lock(); active && !active->finished) {
-          if (active->connection)
+          if (active->connection) {
             active->connection->disconnect();
-          else
+          } else {
             active->finish();
+          }
         }
       });
     });
@@ -104,8 +108,9 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
     }
     auto self = shared_from_this();
     glz::http_headers headers;
-    for (const auto& header : request.headers)
+    for (const auto& header : request.headers) {
       headers.add(header.name, header.value);
+    }
     glz::stream_request_params_v2 params{
         .method = std::move(request.method),
         .url = std::move(request.url),
@@ -115,8 +120,9 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
         .headers = std::move(headers),
         .on_data =
             [self](std::string_view bytes) {
-              if (self->finished)
+              if (self->finished) {
                 return;
+              }
               if (!self->streaming || self->response.status_code < 200 ||
                   self->response.status_code >= 300) {
                 self->response.body.append(bytes);
@@ -130,8 +136,9 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
             },
         .on_error =
             [self](std::error_code error) {
-              if (!self->finished)
+              if (!self->finished) {
                 self->error = error;
+              }
             },
         .on_progress =
             [self](std::size_t, std::size_t) {
@@ -139,11 +146,13 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
             },
         .on_connect =
             [self](const glz::response& response) {
-              if (self->finished)
+              if (self->finished) {
                 return;
+              }
               self->response.status_code = response.status_code;
-              for (const auto& [name, value] : response.response_headers)
+              for (const auto& [name, value] : response.response_headers) {
                 self->response.headers.push_back({.name = name, .value = value});
+              }
             },
         .on_disconnect =
             [self] { asio::post(self->client->get_executor(), [self] { self->finish(); }); },
@@ -168,8 +177,9 @@ GlazeHttpTransport::GlazeHttpTransport()
 }
 
 Result<HttpResponse> GlazeHttpTransport::send(const HttpRequest& request, std::stop_token stop) {
-  if (on_glaze_io_thread)
+  if (on_glaze_io_thread) {
     return blocking_callback_error();
+  }
   auto done = std::make_shared<std::promise<Result<HttpResponse>>>();
   auto future = done->get_future();
   send_async(
@@ -190,8 +200,9 @@ void GlazeHttpTransport::stream_async(HttpRequest request, HttpDataHandler on_da
 Result<HttpResponse> GlazeHttpTransport::stream(const HttpRequest& request,
                                                 const HttpDataHandler& on_data,
                                                 std::stop_token stop) {
-  if (on_glaze_io_thread)
+  if (on_glaze_io_thread) {
     return blocking_callback_error();
+  }
   auto done = std::make_shared<std::promise<Result<HttpResponse>>>();
   auto future = done->get_future();
   start_request(
@@ -201,7 +212,7 @@ Result<HttpResponse> GlazeHttpTransport::stream(const HttpRequest& request,
 }
 
 void GlazeHttpTransport::start_request(HttpRequest request, HttpDataHandler on_data,
-                                       HttpCompletion complete, std::stop_token stop,
+                                       HttpCompletion complete, const std::stop_token& stop,
                                        bool streaming) {
   auto operation = std::make_shared<Operation>();
   operation->client = client_;

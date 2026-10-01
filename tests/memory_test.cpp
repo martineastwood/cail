@@ -617,9 +617,26 @@ void test_attachment_base64() {
   std::filesystem::remove_all(directory);
 }
 
+void test_paused_turn_not_saved() {
+  auto memory = std::make_shared<cail::InMemoryConversationMemory>();
+  cail::LanguageModel model([](auto, auto) -> cail::Result<cail::GenerationResponse> {
+    return cail::GenerationResponse{
+        .tool_calls = {{.id = "a", .name = "lookup", .arguments = "1"}}};
+  });
+  auto tool = cail::tool<int, int>("lookup", "Lookup", [](int input) { return input; });
+  cail::Agent agent(
+      {.model = model, .tools = {tool}, .memory = memory, .conversation_id = "paused"});
+  auto paused = agent.generate("look up", {.pause_when = [](const auto&) { return true; }});
+  check(paused && paused->tool_continuation && memory->load("paused")->empty(),
+        "paused turns do not save incomplete tool exchanges");
+  check(agent.generate("try again", {.pause_when = [](const auto&) { return true; }}).has_value(),
+        "paused turns release the conversation lease");
+}
+
 } // namespace test
 
 int main() {
+  test::test_paused_turn_not_saved();
   test::test_in_memory_conversation();
   test::test_file_conversation();
   test::test_trim_turns();

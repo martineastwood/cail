@@ -47,8 +47,9 @@ Result<GenerationResponse> decode_response(ResponseBody response_body, int http_
                                                 ? response_body.incomplete_details->reason
                                                 : std::optional<std::string>{response_body.status});
   if (response_body.status == "incomplete") {
-    if (result.status != GenerationStatus::refused)
+    if (result.status != GenerationStatus::refused) {
       result.status = GenerationStatus::incomplete;
+    }
   } else if (response_body.status != "completed") {
     return std::unexpected(Error{
         .code = ErrorCode::provider_response,
@@ -130,10 +131,11 @@ Result<GenerationResponse> decode_response(ResponseBody response_body, int http_
                                 : std::nullopt,
     };
   }
-  if (result.status == GenerationStatus::refused)
+  if (result.status == GenerationStatus::refused) {
     result.finish_reason = FinishReason::content_filter;
-  else if (result.finish_reason == FinishReason::stop && !result.tool_calls.empty())
+  } else if (result.finish_reason == FinishReason::stop && !result.tool_calls.empty()) {
     result.finish_reason = FinishReason::tool_calls;
+  }
   return result;
 }
 

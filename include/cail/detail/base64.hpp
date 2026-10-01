@@ -28,8 +28,9 @@ namespace cail::detail {
 [[nodiscard]] inline std::optional<std::string> base64_decode(std::string_view encoded) {
   constexpr std::string_view alphabet =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  if (encoded.size() % 4 != 0)
+  if (encoded.size() % 4 != 0) {
     return std::nullopt;
+  }
   std::string bytes;
   bytes.reserve(encoded.size() / 4 * 3);
   for (std::size_t index = 0; index < encoded.size(); index += 4) {
@@ -43,13 +44,16 @@ namespace cail::detail {
         third == std::string_view::npos || fourth == std::string_view::npos ||
         (third_padding && !fourth_padding) ||
         ((third_padding || fourth_padding) && index + 4 != encoded.size()) ||
-        (third_padding && (second & 15U)) || (!third_padding && fourth_padding && (third & 3U)))
+        (third_padding && (second & 15U)) || (!third_padding && fourth_padding && (third & 3U))) {
       return std::nullopt;
+    }
     bytes.push_back(static_cast<char>((first << 2U) | (second >> 4U)));
-    if (!third_padding)
+    if (!third_padding) {
       bytes.push_back(static_cast<char>((second << 4U) | (third >> 2U)));
-    if (!fourth_padding)
+    }
+    if (!fourth_padding) {
       bytes.push_back(static_cast<char>((third << 6U) | fourth));
+    }
   }
   return bytes;
 }

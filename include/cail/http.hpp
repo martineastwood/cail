@@ -51,24 +51,27 @@ namespace detail {
 
 class AsyncRetryTimer {
 public:
-  AsyncRetryTimer() : worker_([this](std::stop_token stop) { run(stop); }) {}
+  AsyncRetryTimer() : worker_([this](const std::stop_token& stop) { run(stop); }) {}
   ~AsyncRetryTimer() { shutdown(); }
 
   void shutdown() {
     std::vector<Task> cancelled;
     {
       std::lock_guard lock(mutex_);
-      if (closing_)
+      if (closing_) {
         return;
+      }
       closing_ = true;
       cancelled.swap(tasks_);
     }
     worker_.request_stop();
     ready_.notify_all();
     worker_.join();
-    for (auto& task : cancelled)
-      if (task.cancel)
+    for (auto& task : cancelled) {
+      if (task.cancel) {
         task.cancel();
+      }
+    }
   }
 
   [[nodiscard]] std::size_t schedule(std::chrono::milliseconds delay, std::function<void()> task,
@@ -76,8 +79,9 @@ public:
     std::size_t id;
     {
       std::lock_guard lock(mutex_);
-      if (closing_)
+      if (closing_) {
         return 0;
+      }
       id = ++next_id_;
       tasks_.push_back(
           {id, std::chrono::steady_clock::now() + delay, std::move(task), std::move(cancel)});
@@ -99,7 +103,7 @@ private:
     std::function<void()> cancel;
   };
 
-  void run(std::stop_token stop) {
+  void run(const std::stop_token& stop) {
     std::unique_lock lock(mutex_);
     while (!stop.stop_requested()) {
       if (tasks_.empty()) {
@@ -152,6 +156,8 @@ public:
 
   [[nodiscard]] virtual Result<HttpResponse> send(const HttpRequest& request,
                                                   std::stop_token stop) = 0;
+  // Async implementations take ownership of these arguments, including overrides.
+  // NOLINTBEGIN(performance-unnecessary-value-param)
   virtual void send_async(HttpRequest, HttpCompletion complete, std::stop_token) {
     detail::complete_once<HttpResponse>(std::move(complete))(
         std::unexpected(Error{.code = ErrorCode::invalid_configuration,
@@ -164,6 +170,7 @@ public:
         std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                               .message = "The HTTP transport does not support async streaming."}));
   }
+  // NOLINTEND(performance-unnecessary-value-param)
   // Delivers response body bytes incrementally; the returned body is not buffered.
   [[nodiscard]] virtual Result<HttpResponse>
   stream(const HttpRequest& request, const HttpDataHandler& on_data, std::stop_token stop) = 0;
@@ -249,13 +256,13 @@ public:
 
 private:
   void request_async(HttpRequest request, HttpDataHandler on_data, HttpCompletion complete,
-                     std::stop_token stop) {
+                     const std::stop_token& stop) {
     struct Operation : std::enable_shared_from_this<Operation> {
       Operation(std::shared_ptr<HttpTransport> transport, HttpRequest request,
                 HttpCompletion complete, std::stop_token stop, RetryPolicy policy)
           : transport(std::move(transport)), request(std::move(request)),
-            complete(std::move(complete)), stop(stop), policy(policy), delay(policy.initial_delay) {
-      }
+            complete(std::move(complete)), stop(std::move(stop)), policy(policy),
+            delay(policy.initial_delay) {}
 
       std::shared_ptr<HttpTransport> transport;
       HttpRequest request;
@@ -315,20 +322,23 @@ private:
                     closing = *self->timer_id == 0;
                   }
                 }
-                if (closing)
+                if (closing) {
                   self->finish(std::unexpected(detail::http_request_cancelled_error()));
+                }
               }});
-          if (on_data)
+          if (on_data) {
             transport->stream_async(
                 request,
                 [self = shared_from_this()](std::string_view bytes) {
                   self->received_data = true;
-                  if (!self->finished.load() && !self->stop.stop_requested())
+                  if (!self->finished.load() && !self->stop.stop_requested()) {
                     self->on_data(bytes);
+                  }
                 },
                 std::move(completion), stop);
-          else
+          } else {
             transport->send_async(request, std::move(completion), stop);
+          }
         } catch (const std::exception& error) {
           finish(std::unexpected(
               Error{.code = ErrorCode::transport,
@@ -374,7 +384,7 @@ public:
 
 private:
   template <typename Send, typename CanRetry = decltype([] { return true; })>
-  [[nodiscard]] Result<HttpResponse> retry(Send&& send, std::stop_token stop,
+  [[nodiscard]] Result<HttpResponse> retry(Send&& send, const std::stop_token& stop,
                                            CanRetry&& can_retry = {}) const {
     auto delay = policy_.initial_delay;
     for (std::size_t attempt = 0;; ++attempt) {

@@ -40,8 +40,9 @@ template <typename T> [[nodiscard]] Result<T> from_json(std::string_view json) {
     });
   }
 
-  if (auto result = detail::ValueValidator<T>::check(value, "$"); !result)
+  if (auto result = detail::ValueValidator<T>::check(value, "$"); !result) {
     return std::unexpected(result.error());
+  }
   return value;
 }
 

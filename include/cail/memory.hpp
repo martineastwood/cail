@@ -27,12 +27,14 @@ namespace cail {
 // messages, while preserving leading system and developer messages.
 // Zero keeps the full history.
 inline void trim_turns(std::vector<Message>& messages, std::size_t keep_last) {
-  if (!keep_last)
+  if (!keep_last) {
     return;
+  }
   auto prefix = messages.begin();
   while (prefix != messages.end() &&
-         (prefix->role == MessageRole::system || prefix->role == MessageRole::developer))
+         (prefix->role == MessageRole::system || prefix->role == MessageRole::developer)) {
     ++prefix;
+  }
   std::size_t turns = 0;
   for (auto cursor = messages.end(); cursor != prefix;) {
     --cursor;
@@ -92,6 +94,8 @@ public:
   using Completion = std::function<void(Result<void>)>;
 
   // Blocking stores use bounded workers. Remote stores can override these methods.
+  // Overrides may retain the stop token, so keep the ownership-taking signatures.
+  // NOLINTBEGIN(performance-unnecessary-value-param)
   [[nodiscard]] virtual Result<void> load_async(std::string id, LoadCompletion complete,
                                                 std::stop_token stop = {}) {
     return post_memory<std::vector<Message>>(
@@ -115,25 +119,29 @@ public:
         [id = std::move(id)](ConversationMemory& memory) { return memory.clear(id); });
   }
 
+  // NOLINTEND(performance-unnecessary-value-param)
 private:
   template <typename T, typename Callback, typename Work>
-  Result<void> post_memory(Callback complete, std::stop_token stop, Work work) {
-    if (!complete)
+  Result<void> post_memory(Callback complete, const std::stop_token& stop, Work work) {
+    if (!complete) {
       return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                    .message = "Async memory requires a completion handler."});
-    if (stop.stop_requested())
+    }
+    if (stop.stop_requested()) {
       return std::unexpected(generation_cancelled_error());
+    }
     auto owner = weak_from_this().lock();
-    if (!owner)
+    if (!owner) {
       return std::unexpected(
           Error{.code = ErrorCode::memory, .message = "Async memory requires shared ownership."});
+    }
     return detail::memory_workers().post(
         [owner, work = std::move(work), stop, done = detail::complete_once<T>(std::move(complete))](
-            std::stop_token worker_stop) mutable {
+            const std::stop_token& worker_stop) mutable {
           detail::LinkedStop linked(stop, worker_stop);
-          if (linked.source.stop_requested())
+          if (linked.source.stop_requested()) {
             done(std::unexpected(generation_cancelled_error()));
-          else {
+          } else {
             auto result = detail::memory_operation([&] { return work(*owner); });
             done(linked.source.stop_requested()
                      ? Result<T>{std::unexpected(generation_cancelled_error())}
@@ -149,14 +157,16 @@ private:
   // same conversation are rejected instead of silently reordering history.
   [[nodiscard]] Result<std::shared_ptr<void>> acquire_turn(const std::string& id) {
     auto owner = weak_from_this().lock();
-    if (!owner)
+    if (!owner) {
       return std::unexpected(
           Error{.code = ErrorCode::memory,
                 .message = "Conversation turns require shared memory ownership."});
+    }
     std::lock_guard lock(turn_mutex_);
-    if (!active_turns_.insert(id).second)
+    if (!active_turns_.insert(id).second) {
       return std::unexpected(Error{.code = ErrorCode::memory,
                                    .message = "A turn is already active for conversation: " + id});
+    }
     return std::shared_ptr<void>(this, [owner = std::move(owner), id](void*) {
       std::lock_guard lock(owner->turn_mutex_);
       owner->active_turns_.erase(id);
@@ -234,17 +244,19 @@ public:
             [](auto& value) -> Result<void> {
               if constexpr (requires { value.bytes; }) {
                 auto bytes = detail::base64_decode(value.bytes);
-                if (!bytes)
+                if (!bytes) {
                   return std::unexpected(
                       Error{.code = ErrorCode::memory,
                             .message = "Stored attachment contains invalid base64."});
+                }
                 value.bytes = std::move(*bytes);
               }
               return {};
             },
             part);
-        if (!valid)
+        if (!valid) {
           return std::unexpected(valid.error());
+        }
       }
     }
     return std::move(conversation->messages);
@@ -300,8 +312,9 @@ private:
       for (auto& part : message.content) {
         std::visit(
             [](auto& value) {
-              if constexpr (requires { value.bytes; })
+              if constexpr (requires { value.bytes; }) {
                 value.bytes = detail::base64_encode(value.bytes);
+              }
             },
             part);
       }
@@ -333,7 +346,7 @@ private:
   // File instances in this process share a lock, including read-modify-write
   // and the temporary file used by atomic replacement.
   inline static std::recursive_mutex mutex_;
-  std::filesystem::path directory_{};
+  std::filesystem::path directory_;
 };
 
 } // namespace cail

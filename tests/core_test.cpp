@@ -786,9 +786,145 @@ void test_tool_loop_partial_progress() {
         "failure before a model response has no partial progress");
 }
 
+void test_tool_recovery_and_resume() {
+  int executions = 0;
+  auto tool = cail::tool<ToolInput, ToolOutput>(
+      "count", "Count characters", [&](const ToolInput& input) -> cail::Result<ToolOutput> {
+        ++executions;
+        if (input.query == "fail")
+          return std::unexpected(cail::Error{.code = cail::ErrorCode::tool_execution,
+                                             .message = "Try a different query"});
+        return ToolOutput{.count = static_cast<int>(input.query.size())};
+      });
+  const cail::GenerationResponse calls{
+      .usage = cail::TokenUsage{.input_tokens = 3, .output_tokens = 2},
+      .tool_calls = {{.id = "a", .name = "count", .arguments = R"({"query":"fail"})"},
+                     {.id = "b", .name = "count", .arguments = R"({"query":"ok"})"}},
+  };
+  ScriptedClient failing({calls});
+  auto failure = cail::run_tool_loop(failing, {}, {tool});
+  check(!failure && failure.error().code == cail::ErrorCode::tool_execution && executions == 1,
+        "tool errors remain terminal by default");
+  ScriptedClient recovering({calls, cail::GenerationResponse{.text = "recovered"}});
+  auto recovered = cail::run_tool_loop(recovering, {}, {tool}, {.recover_tool_errors = true});
+  check(recovered && recovered->tool_results.size() == 2 && recovered->steps.size() == 2 &&
+            recovered->tool_results[0].output == R"({"error":"Try a different query"})",
+        "recoverable errors become tool results and later calls execute");
+  ScriptedClient invalid(
+      {cail::GenerationResponse{.tool_calls = {{.id = "bad", .name = "count", .arguments = "{}"}}},
+       cail::GenerationResponse{.text = "fixed"}});
+  check(cail::run_tool_loop(invalid, {}, {tool}, {.recover_tool_errors = true}).has_value(),
+        "invalid typed arguments can be returned to the model");
+  auto fatal = cail::tool<ToolInput, ToolOutput>(
+      "count", "Count", [](const ToolInput&) -> cail::Result<ToolOutput> {
+        return std::unexpected(
+            cail::Error{.code = cail::ErrorCode::transport, .message = "offline"});
+      });
+  ScriptedClient infrastructure({calls});
+  check(!cail::run_tool_loop(infrastructure, {}, {fatal}, {.recover_tool_errors = true}),
+        "infrastructure failures remain terminal with recovery enabled");
+
+  const auto before = executions;
+  ScriptedClient paused_client(
+      {calls,
+       cail::GenerationResponse{.text = "approved",
+                                .usage = cail::TokenUsage{.input_tokens = 4, .output_tokens = 1}}});
+  auto paused =
+      cail::run_tool_loop(paused_client,
+                          {.messages = {{.content = {cail::TextPart{.text = "count"}}}},
+                           .session_id = "session",
+                           .max_output_tokens = 42,
+                           .tool_choice = cail::ToolChoice{.mode = cail::ToolChoiceMode::required}},
+                          {tool}, {.pause_when = [](const auto& call) { return call.id == "b"; }});
+  check(paused && paused->tool_continuation && executions == before &&
+            paused_client.requests.size() == 1,
+        "a matching call pauses the entire batch before any tool executes");
+  if (!paused || !paused->tool_continuation)
+    return;
+  auto& continuation = *paused->tool_continuation;
+  check(!cail::resume_tool_loop(paused_client, continuation, {}), "missing results reject resume");
+  check(!cail::resume_tool_loop(paused_client, continuation,
+                                {{.call_id = "b", .name = "count", .output = "{}"},
+                                 {.call_id = "a", .name = "count", .output = "{}"}}),
+        "out-of-order results reject resume");
+  std::stop_source stopped;
+  stopped.request_stop();
+  const std::vector<cail::ToolResult> results{
+      {.call_id = "a", .name = "count", .output = R"({"error":"Approval denied"})"},
+      {.call_id = "b", .name = "count", .output = R"({"count":2})"}};
+  check(!cail::resume_tool_loop(paused_client, continuation, results, stopped.get_token()),
+        "pre-cancelled resume does not consume continuation");
+  auto resumed = cail::resume_tool_loop(paused_client, continuation, results);
+  check(resumed && resumed->text == "approved" && resumed->steps.size() == 2 &&
+            resumed->turn.size() == 4 && resumed->total_usage->input_tokens == 7 &&
+            resumed->tool_results.size() == 2 && executions == before,
+        "resume preserves progress and accepts external results without rerunning tools");
+  const auto& request = paused_client.requests.back();
+  check(request.messages.size() == 4 && request.session_id == "session" &&
+            request.max_output_tokens == 42 &&
+            request.tool_choice->mode == cail::ToolChoiceMode::auto_ && request.step == 1,
+        "resume preserves request settings and advances tool choice and step");
+  check(!cail::resume_tool_loop(paused_client, continuation, results) &&
+            paused_client.requests.size() == 2,
+        "continuation cannot be replayed");
+
+  ScriptedClient bounded({calls, calls});
+  auto first = cail::run_tool_loop(
+      bounded, {}, {tool}, {.max_rounds = 1, .pause_when = [](const auto&) { return true; }});
+  auto limit = cail::resume_tool_loop(bounded, *first->tool_continuation, results);
+  check(!limit && limit.error().code == cail::ErrorCode::tool_loop_limit &&
+            limit.error().partial_response->tool_results.size() == 2,
+        "resume cannot reset the tool round limit and preserves progress on failure");
+
+  std::stop_source pause_stop;
+  ScriptedClient cancelling({calls});
+  auto cancelled_pause = cail::run_tool_loop(
+      cancelling, {}, {tool}, {.stop = pause_stop.get_token(), .pause_when = [&](const auto&) {
+                                 pause_stop.request_stop();
+                                 return true;
+                               }});
+  check(!cancelled_pause && cancelled_pause.error().code == cail::ErrorCode::cancelled &&
+            executions == before,
+        "cancellation in a pause condition prevents tool execution and resumption");
+
+  ScriptedClient repeated({calls, calls, cail::GenerationResponse{.text = "twice"}});
+  auto again =
+      cail::run_tool_loop(repeated, {}, {tool}, {.pause_when = [](const auto&) { return true; }});
+  again = cail::resume_tool_loop(repeated, *again->tool_continuation, results);
+  check(again && again->tool_continuation && again->steps.size() == 2,
+        "a resumed workflow can pause on another batch");
+  again = cail::resume_tool_loop(repeated, *again->tool_continuation, results);
+  check(again && !again->tool_continuation && again->steps.size() == 3 &&
+            again->tool_results.size() == 4,
+        "multiple pauses retain all progress without reusing old continuations");
+
+  ScriptedClient concurrent({calls, cail::GenerationResponse{.text = "once"}});
+  auto one =
+      cail::run_tool_loop(concurrent, {}, {tool}, {.pause_when = [](const auto&) { return true; }});
+  auto attempt = [&] {
+    return cail::resume_tool_loop(concurrent, *one->tool_continuation, results);
+  };
+  auto left = std::async(std::launch::async, attempt);
+  auto right = std::async(std::launch::async, attempt);
+  const auto left_result = left.get();
+  const auto right_result = right.get();
+  check(left_result.has_value() != right_result.has_value() && concurrent.requests.size() == 2,
+        "concurrent resume attempts send only one follow-up request");
+
+  ScriptedClient streaming({calls, cail::GenerationResponse{.text = "streamed"}});
+  auto stream_pause = cail::stream_tool_loop(streaming, {}, {tool}, [](const auto&) {},
+                                             {.pause_when = [](const auto&) { return true; }});
+  std::string text;
+  auto streamed = cail::resume_stream_tool_loop(
+      streaming, *stream_pause->tool_continuation, results,
+      [&](const auto& event) { text += std::get<cail::TextDelta>(event).text; });
+  check(streamed && text == "streamed", "paused streams resume with streamed events");
+}
+
 } // namespace test
 
 int main() {
+  test::test_tool_recovery_and_resume();
   test::test_tool_loop_partial_progress();
   test::test_length_constraints();
   test::test_constraint_validation();

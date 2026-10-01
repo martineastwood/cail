@@ -175,20 +175,27 @@ template <typename T> [[nodiscard]] Result<std::string> json_schema() {
 namespace detail {
 
 [[nodiscard]] inline Result<SchemaType> schema_type_from_name(std::string_view name) {
-  if (name == "object")
+  if (name == "object") {
     return SchemaType::object;
-  if (name == "array")
+  }
+  if (name == "array") {
     return SchemaType::array;
-  if (name == "string")
+  }
+  if (name == "string") {
     return SchemaType::string;
-  if (name == "integer")
+  }
+  if (name == "integer") {
     return SchemaType::integer;
-  if (name == "number")
+  }
+  if (name == "number") {
     return SchemaType::number;
-  if (name == "boolean")
+  }
+  if (name == "boolean") {
     return SchemaType::boolean;
-  if (name == "null")
+  }
+  if (name == "null") {
     return SchemaType::null;
+  }
   return std::unexpected(Error{
       .code = ErrorCode::json_deserialization,
       .message = "Unsupported JSON Schema type: " + std::string{name},
@@ -199,7 +206,7 @@ namespace detail {
                                                                   std::string_view key) {
   if (value.is_number()) {
     const auto number = value.as<double>();
-    if (!(number >= 0 && number < std::ldexp(1.0, std::numeric_limits<std::size_t>::digits)) ||
+    if (number < 0 || number >= std::ldexp(1.0, std::numeric_limits<std::size_t>::digits) ||
         number != static_cast<double>(static_cast<std::size_t>(number))) {
       return std::unexpected(Error{
           .code = ErrorCode::json_deserialization,
@@ -226,8 +233,9 @@ namespace detail {
   const auto& type = source["type"];
   if (type.is_string()) {
     auto parsed = schema_type_from_name(type.get<std::string>());
-    if (!parsed)
+    if (!parsed) {
       return std::unexpected(parsed.error());
+    }
     result.type = *parsed;
   } else if (const auto* types = type.get_if<glz::generic::array_t>()) {
     std::vector<SchemaType> parsed_types;
@@ -240,8 +248,9 @@ namespace detail {
         });
       }
       auto parsed = schema_type_from_name(entry.get<std::string>());
-      if (!parsed)
+      if (!parsed) {
         return std::unexpected(parsed.error());
+      }
       parsed_types.push_back(*parsed);
     }
     result.type = std::move(parsed_types);
@@ -263,14 +272,16 @@ namespace detail {
   }
   if (source.contains("minLength")) {
     auto length = schema_size_from_generic(source["minLength"], "minLength");
-    if (!length)
+    if (!length) {
       return std::unexpected(length.error());
+    }
     result.min_length = *length;
   }
   if (source.contains("maxLength")) {
     auto length = schema_size_from_generic(source["maxLength"], "maxLength");
-    if (!length)
+    if (!length) {
       return std::unexpected(length.error());
+    }
     result.max_length = *length;
   }
   if (source.contains("enum")) {
@@ -303,8 +314,9 @@ namespace detail {
     result.properties.emplace();
     for (const auto& [name, value] : *properties) {
       auto child = schema_from_generic(value);
-      if (!child)
+      if (!child) {
         return std::unexpected(child.error());
+      }
       result.properties->emplace(name, std::make_shared<Schema>(std::move(*child)));
     }
   }
@@ -329,8 +341,9 @@ namespace detail {
   }
   if (source.contains("items")) {
     auto items = schema_from_generic(source["items"]);
-    if (!items)
+    if (!items) {
       return std::unexpected(items.error());
+    }
     result.items = std::make_shared<Schema>(std::move(*items));
   }
   if (source.contains("additionalProperties")) {
@@ -345,14 +358,16 @@ namespace detail {
   }
   if (source.contains("minItems")) {
     auto min_items = schema_size_from_generic(source["minItems"], "minItems");
-    if (!min_items)
+    if (!min_items) {
       return std::unexpected(min_items.error());
+    }
     result.min_items = *min_items;
   }
   if (source.contains("maxItems")) {
     auto max_items = schema_size_from_generic(source["maxItems"], "maxItems");
-    if (!max_items)
+    if (!max_items) {
       return std::unexpected(max_items.error());
+    }
     result.max_items = *max_items;
   }
   return result;

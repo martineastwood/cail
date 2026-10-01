@@ -46,14 +46,14 @@ make_openai_responses_client(openai::Config config, std::unique_ptr<HttpTranspor
 
 LanguageModel language_model_from(const std::shared_ptr<openai::Client>& client) {
   return LanguageModel{
-      [client](const GenerationRequest& request, std::stop_token stop) {
+      [client](const GenerationRequest& request, const std::stop_token& stop) {
         return client->generate(request, stop);
       },
       [client](const GenerationRequest& request, const StreamHandler& handler,
-               std::stop_token stop) { return client->stream(request, handler, stop); },
+               const std::stop_token& stop) { return client->stream(request, handler, stop); },
       openai_responses_adapter_capabilities(),
       [client](GenerationRequest request, LanguageModel::GenerationCompletion complete,
-               std::stop_token stop) {
+               const std::stop_token& stop) {
         return client->generate_async(
             std::move(request),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {
@@ -62,7 +62,7 @@ LanguageModel language_model_from(const std::shared_ptr<openai::Client>& client)
             stop);
       },
       [client](GenerationRequest request, StreamHandler handler,
-               LanguageModel::GenerationCompletion complete, std::stop_token stop) {
+               LanguageModel::GenerationCompletion complete, const std::stop_token& stop) {
         return client->stream_async(
             std::move(request), std::move(handler),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {
@@ -201,48 +201,54 @@ Client::Client(Config config, std::unique_ptr<HttpTransport> transport)
     : config_(std::move(config)), transport_(std::move(transport)) {}
 
 Result<GenerationResponse> Client::generate(const GenerationRequest& request,
-                                            std::stop_token stop) const {
+                                            const std::stop_token& stop) const {
   return generate_impl(request, {}, stop);
 }
 
 Result<GenerationResponse> Client::stream(const GenerationRequest& request,
                                           const StreamHandler& on_event,
-                                          std::stop_token stop) const {
+                                          const std::stop_token& stop) const {
   return generate_impl(request, on_event, stop);
 }
 
 Result<GenerationResponse> Client::stream(std::string_view prompt, const StreamHandler& on_event,
-                                          std::stop_token stop) const {
+                                          const std::stop_token& stop) const {
   return stream(detail::user_prompt_request(prompt), on_event, stop);
 }
 
 Result<void> Client::generate_async(GenerationRequest request,
                                     LanguageModel::GenerationCompletion complete,
-                                    std::stop_token stop) const {
-  if (stop.stop_requested())
+                                    const std::stop_token& stop) const {
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
-  if (!complete)
+  }
+  if (!complete) {
     return std::unexpected(Error{.code = ErrorCode::invalid_configuration,
                                  .message = "Async generation requires a completion handler."});
+  }
   auto http = make_http_request(request, false);
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   return cail::detail::send_generation_async(*transport_, std::move(request), std::move(*http),
                                              std::move(complete), stop, decode_http_response);
 }
 
 Result<void> Client::stream_async(GenerationRequest request, StreamHandler on_event,
                                   LanguageModel::GenerationCompletion complete,
-                                  std::stop_token stop) const {
-  if (!on_event || !complete)
+                                  const std::stop_token& stop) const {
+  if (!on_event || !complete) {
     return std::unexpected(
         Error{.code = ErrorCode::invalid_configuration,
               .message = "Async streaming requires event and completion handlers."});
-  if (stop.stop_requested())
+  }
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto http = make_http_request(request, true);
-  if (!http)
+  if (!http) {
     return std::unexpected(http.error());
+  }
   auto state = std::make_shared<StreamState>();
   state->on_event = std::move(on_event);
   state->stop = stop;
@@ -286,8 +292,9 @@ Result<HttpRequest> Client::make_http_request(const GenerationRequest& request,
   if (auto valid = cail::detail::validate_pdf_parts(request); !valid) {
     return std::unexpected(valid.error());
   }
-  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 0); !valid)
+  if (auto valid = cail::detail::validate_request_controls(request, 2.0, 0); !valid) {
     return std::unexpected(valid.error());
+  }
   if (auto valid = cail::detail::validate_max_output_tokens(request); !valid) {
     return std::unexpected(valid.error());
   }
@@ -313,9 +320,10 @@ Result<HttpRequest> Client::make_http_request(const GenerationRequest& request,
   };
   body.temperature = request.temperature;
   body.top_p = request.top_p;
-  if (request.tool_choice)
+  if (request.tool_choice) {
     body.tool_choice = cail::detail::encode_tool_choice(*request.tool_choice,
                                                         cail::detail::ToolChoiceFormat::responses);
+  }
   if (streaming) {
     body.stream = true;
   }
@@ -588,13 +596,15 @@ Result<HttpRequest> Client::make_http_request(const GenerationRequest& request,
 
 Result<GenerationResponse> Client::generate_impl(const GenerationRequest& request,
                                                  const StreamHandler& on_event,
-                                                 std::stop_token stop) const {
+                                                 const std::stop_token& stop) const {
   const bool streaming = static_cast<bool>(on_event);
-  if (stop.stop_requested())
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   auto prepared = make_http_request(request, static_cast<bool>(on_event));
-  if (!prepared)
+  if (!prepared) {
     return std::unexpected(prepared.error());
+  }
   auto http_request = std::move(*prepared);
   StreamState state;
   state.on_event = on_event;
@@ -603,12 +613,15 @@ Result<GenerationResponse> Client::generate_impl(const GenerationRequest& reques
       on_event ? transport_->stream(
                      http_request, [&state](std::string_view bytes) { state.feed(bytes); }, stop)
                : transport_->send(http_request, stop);
-  if (!response)
+  if (!response) {
     return std::unexpected(response.error());
-  if (auto middleware = cail::detail::run_after_response(request, *response); !middleware)
+  }
+  if (auto middleware = cail::detail::run_after_response(request, *response); !middleware) {
     return std::unexpected(middleware.error());
-  if (stop.stop_requested())
+  }
+  if (stop.stop_requested()) {
     return std::unexpected(generation_cancelled_error());
+  }
   return on_event ? state.finish(*response) : decode_http_response(*response);
 }
 

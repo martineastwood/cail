@@ -40,11 +40,11 @@ public:
   explicit EmbeddingClient(EmbeddingClientSettings settings = {});
 
   [[nodiscard]] Result<EmbeddingBatch> embed_many(const std::vector<std::string>& inputs,
-                                                  std::stop_token stop = {}) const;
+                                                  const std::stop_token& stop = {}) const;
 
-  [[nodiscard]] Result<void> embed_many_async(std::vector<std::string> inputs,
+  [[nodiscard]] Result<void> embed_many_async(const std::vector<std::string>& inputs,
                                               EmbeddingModel::BatchCompletion complete,
-                                              std::stop_token stop = {}) const;
+                                              const std::stop_token& stop = {}) const;
 
 private:
   [[nodiscard]] Result<HttpRequest> make_http_request(const std::vector<std::string>& inputs) const;

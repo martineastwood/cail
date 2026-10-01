@@ -32,7 +32,7 @@ supports:
   OpenCode, and local OpenAI-compatible servers
 - Text streaming with typed events, including reasoning and tool-call deltas
 - Structured outputs decoded into your C++ types
-- Function tools with typed argument decoding and an automatic tool loop
+- Function tools with typed argument decoding, recoverable errors, and pause/resume for approval or external execution
 - Agents that bundle a model, standing instructions, and tools
 - Embeddings from any provider
 - An in-memory embedding store for search over small collections
@@ -215,6 +215,11 @@ Call `stop.request_stop()` from another thread to cancel the active stream. `sto
 runs after a model step and before its requested tools execute, so returning `true`
 returns that response without starting another step. `max_rounds` remains a final guard
 against unbounded tool calls.
+
+Set `tool_loop.recover_tool_errors = true` to send argument and execution errors
+back to the model. Set `tool_loop.pause_when` to inspect a batch before tools run,
+then supply results through `resume_tool_loop`. See [Tools](docs/src/content/docs/guides/tools.md)
+for approval, rejection, streaming, and async examples.
 
 ## Agents
 

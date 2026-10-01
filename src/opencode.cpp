@@ -5,6 +5,7 @@
 #include <cail/detail/env.hpp>
 #include <cail/detail/openai_embeddings.hpp>
 #include <cail/opencode.hpp>
+#include <utility>
 
 namespace cail {
 
@@ -40,17 +41,18 @@ inline constexpr std::string_view session_header{"x-opencode-session"};
 }
 
 template <typename Client>
-[[nodiscard]] LanguageModel language_model_from(std::shared_ptr<Client> client, bool has_api_key,
+[[nodiscard]] LanguageModel language_model_from(const std::shared_ptr<Client>& client,
+                                                bool has_api_key,
                                                 AdapterCapabilities capabilities) {
   return LanguageModel{
-      [client, has_api_key](const GenerationRequest& request, std::stop_token stop) {
+      [client, has_api_key](const GenerationRequest& request, const std::stop_token& stop) {
         if (auto valid = validate_request(request, has_api_key); !valid) {
           return Result<GenerationResponse>{std::unexpected(valid.error())};
         }
         return client->generate(request, stop);
       },
       [client, has_api_key](const GenerationRequest& request, const StreamHandler& handler,
-                            std::stop_token stop) {
+                            const std::stop_token& stop) {
         if (auto valid = validate_request(request, has_api_key); !valid) {
           return Result<GenerationResponse>{std::unexpected(valid.error())};
         }
@@ -58,9 +60,10 @@ template <typename Client>
       },
       capabilities,
       [client, has_api_key](GenerationRequest request, LanguageModel::GenerationCompletion complete,
-                            std::stop_token stop) -> Result<void> {
-        if (auto valid = validate_request(request, has_api_key); !valid)
+                            const std::stop_token& stop) -> Result<void> {
+        if (auto valid = validate_request(request, has_api_key); !valid) {
           return std::unexpected(valid.error());
+        }
         return client->generate_async(
             std::move(request),
             [client, complete = std::move(complete)](Result<GenerationResponse> result) {
