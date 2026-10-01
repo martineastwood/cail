@@ -292,12 +292,11 @@ Result<void> apply_chunk(GenerationResponse& result, const ResponseBody& body,
         return std::unexpected(Error{.code = ErrorCode::provider_response,
                                      .message = "Gemini returned an incomplete function call."});
       }
-      if (!call.id || call.id->empty()) {
-        return std::unexpected(Error{.code = ErrorCode::provider_response,
-                                     .message = "Gemini returned a function call without an ID."});
-      }
+      const auto id = call.id && !call.id->empty()
+                          ? *call.id
+                          : call.name + "-" + std::to_string(result.tool_calls.size() + 1);
       cail::ToolCall mapped{
-          .id = *call.id,
+          .id = id,
           .name = call.name,
           .arguments = call.args.str,
           .provider_options = part.thoughtSignature

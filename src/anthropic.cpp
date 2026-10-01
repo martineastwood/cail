@@ -647,8 +647,12 @@ Result<HttpRequest> Client::make_http_request(const GenerationRequest& request,
   };
   cail::detail::append_session_header(http.headers, config_.request_session_header,
                                       request.session_id);
-  http.headers.push_back({.name = "x-api-key", .value = config_.api_key});
-  http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
+  if (!cail::detail::has_header(http.headers, "x-api-key")) {
+    http.headers.push_back({.name = "x-api-key", .value = config_.api_key});
+  }
+  if (!cail::detail::has_header(http.headers, "Authorization")) {
+    http.headers.push_back({.name = "Authorization", .value = "Bearer " + config_.api_key});
+  }
   http.headers.push_back({.name = "anthropic-version", .value = "2023-06-01"});
   http.headers.push_back({.name = "Content-Type", .value = "application/json"});
   if (streaming) {

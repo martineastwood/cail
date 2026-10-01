@@ -255,6 +255,8 @@ if(BUILD_TESTING)
 
     cail_add_test(core)
     cail_add_test(openai)
+    cail_add_test(anthropic)
+    cail_add_test(gemini)
     cail_add_test(chat_completions)
     cail_add_test(embeddings)
     cail_add_test(embedding_store)
