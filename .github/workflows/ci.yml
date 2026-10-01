@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 45
     env:
       CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
       CCACHE_MAXSIZE: 1G
     strategy:
       fail-fast: false
@@ -81,12 +81,12 @@ jobs:
         run: brew install ccache openssl@3
 
       - name: Prepare compiler cache
-        run: mkdir -p "$RUNNER_TEMP/ccache"
+        run: mkdir -p .cache/ccache
 
       - name: Restore compiler cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/ccache
+          path: .cache/ccache
           key: cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             cail-ccache-${{ runner.os }}-${{ matrix.cxx }}-${{ github.ref }}-
@@ -139,7 +139,7 @@ jobs:
     timeout-minutes: 45
     env:
       CAIL_FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/cail-fetchcontent
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
       CCACHE_MAXSIZE: 1G
     strategy:
       fail-fast: false
@@ -161,7 +161,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends ccache ninja-build g++ libssl-dev
 
       - name: Prepare compiler cache
-        run: mkdir -p "$RUNNER_TEMP/ccache"
+        run: mkdir -p .cache/ccache
 
       - name: Install CMake
         run: |
@@ -173,7 +173,7 @@ jobs:
       - name: Restore compiler cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/ccache
+          path: .cache/ccache
           key: cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             cail-ccache-${{ runner.os }}-g++-${{ matrix.command }}-${{ github.ref }}-
