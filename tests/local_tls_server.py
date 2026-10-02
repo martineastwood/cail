@@ -23,12 +23,15 @@ with tempfile.TemporaryDirectory() as temporary:
     directory = pathlib.Path(temporary)
     cert = directory / "root.pem"
     key = directory / "key.pem"
+    config = directory / "openssl.cnf"
+    config.write_text("[req]\ndistinguished_name=dn\n[dn]\n")
     subprocess.run([
         "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-        "-keyout", str(key), "-out", str(cert), "-subj", "/CN=localhost",
+        "-keyout", str(key), "-out", str(cert), "-subj", "/CN=localhost", "-config", str(config),
         "-addext", "subjectAltName=DNS:localhost",
         "-addext", "basicConstraints=critical,CA:TRUE",
     ], check=True, capture_output=True)
+    subprocess.run(["openssl", "verify", "-CAfile", str(cert), str(cert)], check=True)
     cert_directory = directory / "certs"
     cert_directory.mkdir()
     digest = subprocess.check_output([
@@ -53,6 +56,7 @@ with tempfile.TemporaryDirectory() as temporary:
     ]
     try:
         for endpoint, mode, overrides in cases:
+            print(f"TLS case: {mode}, overrides: {','.join(overrides) or 'none'}", flush=True)
             subprocess.run([sys.argv[1], endpoint, mode],
                            env=environment | overrides, check=True, timeout=45)
     finally:
