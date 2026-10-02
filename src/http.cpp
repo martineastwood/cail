@@ -46,6 +46,10 @@ struct GlazeIoRuntime {
 
 [[nodiscard]] inline GlazeIoRuntime& glaze_io_runtime() {
   (void)async_worker_registry();
+  // Register OpenSSL cleanup before the runtime so its TLS workers exit first.
+  if (OPENSSL_init_ssl(0, nullptr) != 1) {
+    throw std::runtime_error("Could not initialize OpenSSL");
+  }
   static GlazeIoRuntime runtime;
   return runtime;
 }

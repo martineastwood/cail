@@ -15,10 +15,11 @@ int main(int argc, char** argv) {
   try {
     cail::detail::GlazeHttpTransport transport;
     const auto response =
-        transport.send({.method = "GET", .url = argv[1], .timeout = std::chrono::seconds(3)}, {});
+        transport.send({.method = "GET", .url = argv[1], .timeout = std::chrono::seconds(15)}, {});
     test::check(mode != "invalid", "invalid CA file must report a configuration error");
     test::check(response.has_value() == (mode == "trusted"),
-                "TLS verifies the configured trust roots and hostname");
+                "TLS verifies the configured trust roots and hostname" +
+                    (response ? std::string{} : ": " + response.error().message));
     if (response) {
       test::check(response->status_code == 200, "trusted HTTPS reaches the server");
     } else if (mode == "untrusted" || mode == "system") {

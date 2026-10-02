@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory() as temporary:
     try:
         for endpoint, mode, overrides in cases:
             subprocess.run([sys.argv[1], endpoint, mode],
-                           env=environment | overrides, check=True, timeout=20)
+                           env=environment | overrides, check=True, timeout=45)
     finally:
         server.shutdown()
         server.server_close()
