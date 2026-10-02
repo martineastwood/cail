@@ -1,6 +1,7 @@
 #include "detail/glaze_http_transport.hpp"
 #include <atomic>
 #include <cail/detail/asio.hpp>
+#include <cail/detail/system_ca.hpp>
 #include <cail/http.hpp>
 #include <exception>
 #include <functional>
@@ -174,6 +175,9 @@ struct GlazeHttpTransport::Operation : std::enable_shared_from_this<Operation> {
 GlazeHttpTransport::GlazeHttpTransport()
     : client_(std::make_shared<glz::http_client>(asio::make_strand(glaze_io_runtime().context))) {
   client_->set_graceful_ssl_shutdown(false);
+  if (const auto trust = configure_system_ca(*client_); !trust) {
+    throw std::system_error(trust.error(), "Could not load trusted TLS certificates");
+  }
 }
 
 Result<HttpResponse> GlazeHttpTransport::send(const HttpRequest& request, std::stop_token stop) {

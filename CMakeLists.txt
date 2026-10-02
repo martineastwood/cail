@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.31)
 
-project(cail VERSION 0.4.0 LANGUAGES CXX)
+project(cail VERSION 0.4.1 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -87,6 +87,7 @@ add_library(cail STATIC
     src/opencode.cpp
     src/openai.cpp
     src/openai_responses_wire.cpp
+    src/system_ca.cpp
 )
 add_library(cail::cail ALIAS cail)
 
@@ -107,6 +108,9 @@ target_link_libraries(cail PUBLIC
     "$<BUILD_INTERFACE:$<TARGET_PROPERTY:glaze::asio,INTERFACE_LINK_LIBRARIES>>"
     magic_enum::magic_enum
 )
+if(APPLE)
+    target_link_libraries(cail PUBLIC "-framework Security" "-framework CoreFoundation")
+endif()
 
 target_include_directories(cail PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -272,6 +276,12 @@ if(BUILD_TESTING)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_executable(cail_tls_test tests/tls_test.cpp)
+        target_link_libraries(cail_tls_test PRIVATE cail::cail)
+        target_include_directories(cail_tls_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        add_test(NAME cail_tls
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_tls_server.py"
+                "$<TARGET_FILE:cail_tls_test>")
         add_executable(cail_local_http_test tests/local_http_test.cpp)
         target_link_libraries(cail_local_http_test PRIVATE cail::cail)
         target_include_directories(cail_local_http_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

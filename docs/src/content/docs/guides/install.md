@@ -54,6 +54,24 @@ CMake at them:
 cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/deps
 ```
 
+## HTTPS certificates
+
+The default HTTP transport uses Apple's system root certificates on macOS and
+your distribution's CA bundle on Linux. Minimal Linux containers need the
+`ca-certificates` package installed, even when you link OpenSSL statically.
+
+For a company proxy or private provider, you can supply a PEM certificate bundle
+before starting your application:
+
+```sh
+SSL_CERT_FILE=/path/to/company-ca-bundle.pem ./my-app
+```
+
+`SSL_CERT_FILE` and `SSL_CERT_DIR` replace the default trust roots. Include all
+the CAs your application needs. Certificate and hostname verification remain
+enabled. Custom macOS Keychain trust settings are not imported automatically;
+use a custom bundle for those certificates.
+
 ## Try the examples (optional)
 
 If you cloned the repository and want runnable samples before wiring CAIL into

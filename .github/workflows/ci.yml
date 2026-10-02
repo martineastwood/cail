@@ -74,7 +74,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ccache ninja-build libssl-dev ${{ matrix.packages }}
+          sudo apt-get install -y --no-install-recommends ccache ninja-build libssl-dev openssl ${{ matrix.packages }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -158,7 +158,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ccache ninja-build g++ libssl-dev
+          sudo apt-get install -y --no-install-recommends ccache ninja-build g++ libssl-dev openssl
 
       - name: Prepare compiler cache
         run: mkdir -p .cache/ccache
@@ -221,7 +221,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++ libssl-dev clang-tidy-20
+          sudo apt-get install -y --no-install-recommends ninja-build g++ libssl-dev openssl clang-tidy-20
           # Ubuntu's default Clang cannot parse libstdc++'s C++23 <expected> header.
           sudo ln -sf /usr/bin/clang-tidy-20 /usr/local/bin/clang-tidy
 

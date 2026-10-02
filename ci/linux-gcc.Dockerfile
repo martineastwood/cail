@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libssl-dev \
     ninja-build \
+    openssl \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
